@@ -8,4 +8,4 @@ ADMIN_CHAT_ID = -1003822685140
 ADMIN_IDS = [6451508865]
 
 # ─── Резервный канал (ссылка) ─────────────────────────────────────────────────
-RESERVE_CHANNEL = "https://t.me/+GfW7xdoDV-xiMzJl"
+RESERVE_CHANNEL = "https://t.me/+GfW7xdoDV-xiMzJl" 
