@@ -488,16 +488,10 @@ async def _finish_invoice(message: Message, state: FSMContext):
         f"🔑 Токен: <code>{token}</code>\n"
         f"📅 Создан: <b>{now}</b>\n"
         f"━━━━━━━━━━━━━━━━━\n\n"
-        f"🔗 <b>Ссылка для оплаты:</b>\n{link}\n\n"
+        f"🔗 <b>Ссылка для оплаты:</b>\n<code>{link}</code>\n\n"
         f"⚠️ Сохраните ссылку перед тем как закрыть это сообщение!",
         parse_mode="HTML",
         reply_markup=main_menu(),
-    )
-    await message.answer(
-        "📤 Поделиться:",
-        reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text="📤 Поделиться ссылкой", switch_inline_query=link)],
-        ]),
     )
 
     tag_link = f"@{message.from_user.username}" if message.from_user.username else f"<a href='tg://user?id={message.from_user.id}'>{message.from_user.full_name}</a>"
