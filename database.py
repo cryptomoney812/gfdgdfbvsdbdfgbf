@@ -547,7 +547,7 @@ async def get_top_today(limit: int = 10) -> list:
     today = date.today()
     async with pool.acquire() as conn:
         rows = await conn.fetch(
-            """SELECT u.tag,
+            r"""SELECT u.tag,
                       COALESCE(SUM(CASE WHEN l.deal_amount ~ '^[0-9]+(\.[0-9]+)?$' THEN l.deal_amount::FLOAT ELSE 0 END), 0) as total,
                       COUNT(l.id) as payout_count
                FROM users u JOIN user_logs l ON u.user_id=l.user_id
@@ -563,7 +563,7 @@ async def get_top_month(limit: int = 10) -> list:
     now = date.today()
     async with pool.acquire() as conn:
         rows = await conn.fetch(
-            """SELECT u.tag,
+            r"""SELECT u.tag,
                       COALESCE(SUM(CASE WHEN l.deal_amount ~ '^[0-9]+(\.[0-9]+)?$' THEN l.deal_amount::FLOAT ELSE 0 END), 0) as total,
                       COUNT(l.id) as payout_count
                FROM users u JOIN user_logs l ON u.user_id=l.user_id
