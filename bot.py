@@ -375,8 +375,13 @@ async def site_picked(call: CallbackQuery, state: FSMContext):
         await call.answer("Сайт недоступен.", show_alert=True); return
     await state.update_data(site_id=site_id, site_name=site["name"], site_domain=site["domain"], url_template=site.get("url_template", ""))
     await call.message.edit_text(
-        f"💰 <b>Сайт: {site['name']}</b>\n\nВведите сумму в USD:\n<i>Например: 50 или 150.50</i>",
+        f"💰 <b>Сайт: {site['name']}</b>",
         parse_mode="HTML",
+    )
+    await call.message.answer(
+        "Введите сумму в USD:\n<i>Например: 50 или 150.50</i>",
+        parse_mode="HTML",
+        reply_markup=kb_cancel(),
     )
     await state.set_state(InvoiceFSM.amount)
     await call.answer()
@@ -425,6 +430,7 @@ async def invoice_from_name(message: Message, state: FSMContext):
     await message.answer(
         "💳 Введите адрес кошелька получателя (<b>Recipient address</b>):\n<i>Например: 0x1234...abcd</i>",
         parse_mode="HTML",
+        reply_markup=kb_cancel(),
     )
     await state.set_state(InvoiceFSM.wallet_address)
 
@@ -485,6 +491,10 @@ async def _finish_invoice(message: Message, state: FSMContext):
         f"🔗 <b>Ссылка для оплаты:</b>\n{link}\n\n"
         f"⚠️ Сохраните ссылку перед тем как закрыть это сообщение!",
         parse_mode="HTML",
+        reply_markup=main_menu(),
+    )
+    await message.answer(
+        "📤 Поделиться:",
         reply_markup=InlineKeyboardMarkup(inline_keyboard=[
             [InlineKeyboardButton(text="📤 Поделиться ссылкой", switch_inline_query=link)],
         ]),
