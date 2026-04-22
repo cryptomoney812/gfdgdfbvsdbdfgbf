@@ -637,62 +637,19 @@ async def send_qr_code(call: CallbackQuery):
     except Exception:
         link = f"{site['domain'].rstrip('/')}/?t={token}"
 
-    # Определяем логотип по шаблону сайта
-    url_template = site.get("url_template", "")
-    if "{d}" in url_template:
-        logo_path = "coinbase.png"
-    elif "{s}" in url_template:
-        logo_path = "logo_cryptomus.png"
-    else:
-        logo_path = "heleket.png"
-
+    # Генерируем QR
     import qrcode
     import io
-    import os
-    from PIL import Image
 
     qr = qrcode.QRCode(
         version=None,
-        error_correction=qrcode.constants.ERROR_CORRECT_H,
+        error_correction=qrcode.constants.ERROR_CORRECT_M,
         box_size=10,
         border=2,
     )
     qr.add_data(link)
     qr.make(fit=True)
-    qr_img = qr.make_image(fill_color="black", back_color="white").convert("RGBA")
-
-    # Накладываем логотип если файл существует
-    if os.path.exists(logo_path):
-        logo = Image.open(logo_path).convert("RGBA")
-
-        # Убираем белый/серый фон у логотипа (делаем прозрачным)
-        datas = logo.getdata()
-        new_data = []
-        for item in datas:
-            r, g, b, a = item
-            # Если пиксель светлый (фон) — делаем прозрачным
-            if r > 200 and g > 200 and b > 200:
-                new_data.append((r, g, b, 0))
-            else:
-                new_data.append(item)
-        logo.putdata(new_data)
-
-        qr_w, qr_h = qr_img.size
-        logo_size = qr_w // 4  # логотип занимает 1/4 QR
-        logo = logo.resize((logo_size, logo_size), Image.LANCZOS)
-
-        # Белый круглый фон под логотипом
-        bg_size = logo_size + 24
-        bg = Image.new("RGBA", (bg_size, bg_size), (0, 0, 0, 0))
-        from PIL import ImageDraw
-        draw = ImageDraw.Draw(bg)
-        draw.ellipse([0, 0, bg_size - 1, bg_size - 1], fill=(255, 255, 255, 255))
-
-        bg_pos = ((qr_w - bg_size) // 2, (qr_h - bg_size) // 2)
-        qr_img.paste(bg, bg_pos, mask=bg)
-
-        logo_pos = ((qr_w - logo_size) // 2, (qr_h - logo_size) // 2)
-        qr_img.paste(logo, logo_pos, mask=logo)
+    qr_img = qr.make_image(fill_color="black", back_color="white")
 
     buf = io.BytesIO()
     qr_img.save(buf, format="PNG")
