@@ -1,9 +1,8 @@
 import asyncio
 import logging
-import re
 from datetime import datetime
 
-from aiogram import Bot, Dispatcher, F
+from aiogram import Bot, Dispatcher, F, BaseMiddleware
 from aiogram.filters import Command, CommandStart
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
@@ -15,7 +14,9 @@ from aiogram.types import (
     Message,
     ReplyKeyboardMarkup,
     KeyboardButton,
+    TelegramObject,
 )
+from typing import Any, Callable, Awaitable
 
 from config import ADMIN_CHAT_ID, ADMIN_IDS, BOT_TOKEN, RESERVE_CHANNEL
 import database as db
@@ -26,50 +27,28 @@ bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher(storage=MemoryStorage())
 dp.include_router(onboarding_router)
 
-# ─── Global ban middleware ────────────────────────────────────────────────────
+PAYOUTS_CHANNEL = -1003840310493
+SUPPORT_CHAT_ID = -5285318192
+WORKERS_CHAT_ID = -1003986458830
 
-from aiogram import BaseMiddleware
-from aiogram.types import TelegramObject
-from typing import Any, Callable, Awaitable
+
+# ─── Ban middleware ───────────────────────────────────────────────────────────
 
 class BanMiddleware(BaseMiddleware):
     async def __call__(self, handler: Callable[[TelegramObject, dict], Awaitable[Any]], event: TelegramObject, data: dict) -> Any:
         user = data.get("event_from_user")
         if user and await db.is_banned(user.id):
-            return  # Полностью игнорируем
+            return
         return await handler(event, data)
 
 dp.message.middleware(BanMiddleware())
 dp.callback_query.middleware(BanMiddleware())
-
-PAYOUTS_CHANNEL = -1003840310493
-SUPPORT_CHAT_ID = -5285318192
-WORKERS_CHAT_ID = -1003986458830
-LOGS_PER_PAGE = 5
 
 
 # ─── FSM ─────────────────────────────────────────────────────────────────────
 
 class ChangeTag(StatesGroup):
     waiting = State()
-
-class LogFSM(StatesGroup):
-    wallet = State()
-    deal_scope = State()
-    deal_amount = State()
-    wallet_balance = State()
-    wallet_type = State()
-    gender = State()
-    language = State()
-    country = State()
-    contact = State()
-    messenger = State()
-    client_contact = State()
-    extra_yn = State()
-    extra_info = State()
-
-class RejectLog(StatesGroup):
-    reason = State()
 
 class CheckPhone(StatesGroup):
     waiting = State()
@@ -83,14 +62,15 @@ class Leavementor(StatesGroup):
 class InvoiceFSM(StatesGroup):
     amount = State()
 
+class AddSiteFSM(StatesGroup):
+    name = State()
+    domain = State()
+
 
 # ─── Helpers ─────────────────────────────────────────────────────────────────
 
 def is_admin(user_id: int) -> bool:
     return user_id in ADMIN_IDS
-
-def is_trc20(address: str) -> bool:
-    return bool(re.match(r'^T[1-9A-HJ-NP-Za-km-z]{33}$', address.strip()))
 
 def fmt(n): return f"{n:,.2f}".replace(",", " ")
 
@@ -98,10 +78,9 @@ def main_menu():
     return ReplyKeyboardMarkup(
         keyboard=[
             [KeyboardButton(text="👤 Профиль")],
-            [KeyboardButton(text="📤 Передать кошелёк"), KeyboardButton(text="📚 Пройти инструктаж")],
-            [KeyboardButton(text="📋 Мои логи"), KeyboardButton(text="💡 Полезная информация")],
-            [KeyboardButton(text="🎓 Наставники"), KeyboardButton(text="📡 Резервный канал")],
-            [KeyboardButton(text="🧾 Создать чек")],
+            [KeyboardButton(text="🧾 Создать чек"), KeyboardButton(text="📚 Пройти инструктаж")],
+            [KeyboardButton(text="💡 Полезная информация"), KeyboardButton(text="📡 Резервный канал")],
+            [KeyboardButton(text="🎓 Наставники")],
         ],
         resize_keyboard=True,
     )
@@ -132,66 +111,6 @@ def kb_tools():
         [InlineKeyboardButton(text="◀️ Назад",                callback_data="tools_back")],
     ])
 
-def kb_wallet_type():
-    return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="👤 Личный", callback_data="wtype_personal")],
-        [InlineKeyboardButton(text="🏦 Биржа",  callback_data="wtype_exchange")],
-    ])
-
-def kb_gender():
-    return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="🧔 Мужчина", callback_data="gender_male")],
-        [InlineKeyboardButton(text="👩 Женщина", callback_data="gender_female")],
-    ])
-
-def kb_messenger():
-    return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="Telegram",  callback_data="msg_telegram")],
-        [InlineKeyboardButton(text="WhatsApp",  callback_data="msg_whatsapp")],
-        [InlineKeyboardButton(text="Instagram", callback_data="msg_instagram")],
-    ])
-
-def kb_extra_yn():
-    return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="✅ Да",  callback_data="extra_yes")],
-        [InlineKeyboardButton(text="❌ Нет", callback_data="extra_no")],
-    ])
-
-def kb_log_admin(log_number: str):
-    return InlineKeyboardMarkup(inline_keyboard=[
-        [
-            InlineKeyboardButton(text="✅ Взять",    callback_data=f"log_take:{log_number}"),
-            InlineKeyboardButton(text="❌ Не брать", callback_data=f"log_skip:{log_number}"),
-        ],
-    ])
-
-def kb_log_result(log_number: str):
-    return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="✅ Успешный",    callback_data=f"log_success:{log_number}")],
-        [InlineKeyboardButton(text="❌ Неуспешный",  callback_data=f"log_fail:{log_number}")],
-        [InlineKeyboardButton(text="🚫 Не валидный", callback_data=f"log_invalid:{log_number}")],
-    ])
-
-def kb_logs_page(logs: list, page: int, total: int):
-    rows = []
-    status_icons = {"pending": "⏳", "taken": "🔄", "success": "✅", "fail": "❌", "invalid": "🚫"}
-    for log in logs:
-        icon = status_icons.get(log["status"], "▪️")
-        rows.append([InlineKeyboardButton(text=f"{icon} Лог #{log['log_number']}", callback_data=f"log_view:{log['log_number']}")])
-    nav = []
-    if page > 0:
-        nav.append(InlineKeyboardButton(text="◀️", callback_data=f"logs_page:{page-1}"))
-    total_pages = max(1, (total + LOGS_PER_PAGE - 1) // LOGS_PER_PAGE)
-    nav.append(InlineKeyboardButton(text=f"{page+1}/{total_pages}", callback_data="noop"))
-    if (page + 1) * LOGS_PER_PAGE < total:
-        nav.append(InlineKeyboardButton(text="▶️", callback_data=f"logs_page:{page+1}"))
-    if nav:
-        rows.append(nav)
-    return InlineKeyboardMarkup(inline_keyboard=rows)
-
-def kb_log_back():
-    return InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="◀️ Назад", callback_data="logs_page:0")]])
-
 async def build_profile_text(user: dict) -> str:
     work_mode    = await db.get_setting("work_mode")
     project_cash = await db.get_setting("project_cash")
@@ -213,8 +132,7 @@ async def build_profile_text(user: dict) -> str:
         f"💰 Сумма выплат: <b>{user['payout_sum']} USDT</b>\n"
         f"🤝 Наставник: <b>{mentor_str}</b>\n"
         f"📊 Процент выплат: <b>{int(user['payout_pct'])}%</b>\n"
-        f"🏦 Касса проекта: <b>{project_cash} USDT</b>\n"
-        f"📋 Логов сдано: <b>{user.get('log_count', 0)}</b>\n\n"
+        f"🏦 Касса проекта: <b>{project_cash} USDT</b>\n\n"
         f"🟢 Саппорты в сети:\n{sup_lines}"
     )
 
@@ -229,32 +147,16 @@ async def send_invite(call: CallbackQuery, chat_id: int, label: str):
         await call.message.answer(f"❌ Ошибка: {e}")
     await call.answer()
 
-def format_top(rows: list, title: str) -> str:
-    medals = {1: "🥇", 2: "🥈", 3: "🥉"}
-    if not rows:
-        return f"{title}\n\nПока нет данных."
-    text = f"{title}\n\n"
-    for i, row in enumerate(rows, 1):
-        medal = medals.get(i, f"{i}.")
-        val = row.get("payout_sum", row.get("total", 0))
-        text += f"{medal} <b>{row['tag']}</b> — {val:.2f} USDT\n"
-    return text
-
-def format_top_detailed(rows: list, title: str, period: bool = False) -> str:
+def format_top_detailed(rows: list, title: str) -> str:
     medals = {1: "🥇", 2: "🥈", 3: "🥉"}
     if not rows:
         return f"{title}\n\nПока нет данных."
     text = f"{title}\n━━━━━━━━━━━━━━━━━\n"
     for i, row in enumerate(rows, 1):
         medal = medals.get(i, f"{i}.")
-        if period:
-            val = row.get("total", 0)
-            cnt = row.get("payout_count", 0)
-            text += f"{medal} <b>{row['tag']}</b>\n   💰 {val:.2f} USDT | 🧾 {cnt} выплат\n"
-        else:
-            val = row.get("payout_sum", 0)
-            cnt = row.get("payout_count", 0)
-            text += f"{medal} <b>{row['tag']}</b>\n   💰 {val:.2f} USDT | 🧾 {cnt} выплат\n"
+        val = row.get("payout_sum", 0)
+        cnt = row.get("payout_count", 0)
+        text += f"{medal} <b>{row['tag']}</b>\n   💰 {val:.2f} USDT | 🧾 {cnt} выплат\n"
     return text
 
 
@@ -376,11 +278,7 @@ async def mentor_choose(call: CallbackQuery):
     )
     await call.answer()
     try:
-        await bot.send_message(
-            mentor_id,
-            f"🎓 <b>Новый ученик!</b>\n\nПользователь <b>{user['tag']}</b> выбрал вас наставником.",
-            parse_mode="HTML",
-        )
+        await bot.send_message(mentor_id, f"🎓 <b>Новый ученик!</b>\n\nПользователь <b>{user['tag']}</b> выбрал вас наставником.", parse_mode="HTML")
     except Exception:
         pass
 
@@ -419,7 +317,7 @@ async def leave_mentor_send(message: Message, state: FSMContext):
 @dp.message(F.text == "📚 Пройти инструктаж")
 async def instructions(message: Message, state: FSMContext):
     if await db.is_onboarding_done(message.from_user.id):
-        await message.answer("✅ <b>Вы уже прошли инструктаж.</b>\n\nЕсли есть вопросы — обратитесь к наставнику или саппорту.", parse_mode="HTML"); return
+        await message.answer("✅ <b>Вы уже прошли инструктаж.</b>", parse_mode="HTML"); return
     await start_onboarding(message, state)
 
 
@@ -434,363 +332,171 @@ async def cmd_top(message: Message):
     await message.answer(text, parse_mode="HTML")
 
 
+# ════════════════════════════════════════════════════════════════════════════
+# СОЗДАНИЕ ЧЕКА
+# ════════════════════════════════════════════════════════════════════════════
 
+@dp.message(F.text == "🧾 Создать чек")
+async def invoice_start(message: Message, state: FSMContext):
+    if message.chat.type != "private":
+        return
+    if not await db.is_approved(message.from_user.id):
+        await message.answer("🚫 Доступ закрыт."); return
 
+    sites = await db.get_active_sites()
+    if not sites:
+        await message.answer("❌ <b>Нет доступных сайтов.</b>\n\nОбратитесь к администратору.", parse_mode="HTML"); return
 
-
-
-
-# ─── Мои логи ─────────────────────────────────────────────────────────────────
-
-@dp.message(F.text == "📋 Мои логи")
-async def my_logs(message: Message):
-    logs, total = await db.get_user_logs_page(message.from_user.id, 0)
-    if not logs:
-        await message.answer("📋 У вас пока нет логов."); return
+    buttons = [[InlineKeyboardButton(text=s["name"], callback_data=f"site_pick:{s['id']}")] for s in sites]
+    buttons.append([InlineKeyboardButton(text="❌ Отмена", callback_data="site_cancel")])
     await message.answer(
-        f"📋 <b>Ваши логи</b> (всего: {total}):\n\nНажмите на лог чтобы посмотреть детали:",
-        parse_mode="HTML", reply_markup=kb_logs_page(logs, 0, total),
+        "🌐 <b>Выберите сайт для создания чека:</b>",
+        parse_mode="HTML",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons),
     )
 
-@dp.callback_query(F.data.startswith("logs_page:"))
-async def logs_page_cb(call: CallbackQuery):
-    page = int(call.data.split(":")[1])
-    logs, total = await db.get_user_logs_page(call.from_user.id, page)
+@dp.callback_query(F.data == "site_cancel")
+async def site_cancel(call: CallbackQuery, state: FSMContext):
+    await state.clear()
+    await call.message.edit_text("Отменено.")
+    await call.answer()
+
+@dp.callback_query(F.data.startswith("site_pick:"))
+async def site_picked(call: CallbackQuery, state: FSMContext):
+    site_id = int(call.data.split(":")[1])
+    site = await db.get_site(site_id)
+    if not site or not site["active"]:
+        await call.answer("Сайт недоступен.", show_alert=True); return
+    await state.update_data(site_id=site_id, site_name=site["name"], site_domain=site["domain"])
     await call.message.edit_text(
-        f"📋 <b>Ваши логи</b> (всего: {total}):\n\nНажмите на лог чтобы посмотреть детали:",
-        parse_mode="HTML", reply_markup=kb_logs_page(logs, page, total),
+        f"💰 <b>Сайт: {site['name']}</b>\n\nВведите сумму в USD:\n<i>Например: 50 или 150.50</i>",
+        parse_mode="HTML",
     )
+    await state.set_state(InvoiceFSM.amount)
     await call.answer()
 
-@dp.callback_query(F.data.startswith("log_view:"))
-async def log_view(call: CallbackQuery):
-    log_number = call.data.split(":")[1]
-    log = await db.get_log(log_number)
-    if not log:
-        await call.answer("Лог не найден.", show_alert=True); return
-    status_map = {"pending": "⏳ На рассмотрении", "taken": "🔄 В обработке", "success": "✅ Успешный", "fail": "❌ Неуспешный", "invalid": "🚫 Не валидный"}
-    status = status_map.get(log["status"], log["status"])
-    support_info = f"\n👮 Саппорт: @{log['support_username']}" if log.get("support_username") else ""
-    extra = f"\n📝 Доп. инфо: {log['extra_info']}" if log.get("extra_info") else ""
-    text = (
-        f"📋 <b>Лог #{log['log_number']}</b>\n"
-        f"━━━━━━━━━━━━━━━━━\n"
-        f"📅 {log['created_at']}\n"
-        f"💼 <code>{log['wallet']}</code>\n"
-        f"🔖 {log['wallet_type']} | 💰 {log['wallet_balance']} USDT\n"
-        f"📦 {log['deal_scope']} | 💵 {log['deal_amount']} USDT\n"
-        f"🌐 {log['language']} | 🌍 {log['country']}\n"
-        f"📱 {log['messenger']}: {log['client_contact']}{extra}\n"
-        f"━━━━━━━━━━━━━━━━━\n"
-        f"Статус: {status}{support_info}"
+@dp.message(InvoiceFSM.amount, F.text == "❌ Отмена")
+async def invoice_cancel(message: Message, state: FSMContext):
+    await state.clear()
+    await message.answer("Отменено.", reply_markup=main_menu())
+
+@dp.message(InvoiceFSM.amount)
+async def invoice_process(message: Message, state: FSMContext):
+    raw = message.text.strip().replace(",", ".")
+    try:
+        amount = float(raw)
+        if amount <= 0 or amount > 1_000_000:
+            raise ValueError
+        amount = round(amount, 2)
+    except ValueError:
+        await message.answer("❌ Неверная сумма. Введите число больше 0:\n<i>Например: 50 или 150.50</i>", parse_mode="HTML")
+        return
+
+    data = await state.get_data()
+    await state.clear()
+
+    user = await db.get_or_create_user(
+        message.from_user.id,
+        message.from_user.username or "",
+        message.from_user.full_name,
     )
-    await call.message.edit_text(text, parse_mode="HTML", reply_markup=kb_log_back())
+
+    site_id = data["site_id"]
+    site_name = data["site_name"]
+    site_domain = data["site_domain"]
+
+    token = await db.create_invoice(message.from_user.id, user["tag"], amount, site_id)
+    link = f"{site_domain.rstrip('/')}/?t={token}"
+    now = datetime.now().strftime("%d.%m.%Y %H:%M")
+
+    # Красивое сообщение пользователю
+    await message.answer(
+        f"✅ <b>Чек успешно создан!</b>\n\n"
+        f"━━━━━━━━━━━━━━━━━\n"
+        f"🌐 Сайт: <b>{site_name}</b>\n"
+        f"💰 Сумма: <b>{amount:.2f} USD</b>\n"
+        f"🔑 Токен: <code>{token}</code>\n"
+        f"📅 Создан: <b>{now}</b>\n"
+        f"━━━━━━━━━━━━━━━━━\n\n"
+        f"🔗 <b>Ссылка для оплаты:</b>\n{link}\n\n"
+        f"⚠️ Сохраните ссылку перед тем как закрыть это сообщение!",
+        parse_mode="HTML",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="📤 Поделиться ссылкой", switch_inline_query=link)],
+            [InlineKeyboardButton(text="📋 Мои чеки", callback_data="my_invoices:0")],
+        ]),
+    )
+
+    # Уведомление в чат саппортов
+    tag_link = f"@{message.from_user.username}" if message.from_user.username else f"<a href='tg://user?id={message.from_user.id}'>{message.from_user.full_name}</a>"
+    notify_text = (
+        f"🧾 <b>Новый чек создан</b>\n"
+        f"━━━━━━━━━━━━━━━━━\n"
+        f"👤 Воркер: {tag_link} | <b>{user['tag']}</b>\n"
+        f"🆔 ID: <code>{message.from_user.id}</code>\n"
+        f"━━━━━━━━━━━━━━━━━\n"
+        f"🌐 Сайт: <b>{site_name}</b>\n"
+        f"💰 Сумма: <b>{amount:.2f} USD</b>\n"
+        f"🔑 Токен: <code>{token}</code>\n"
+        f"🔗 Ссылка: {link}\n"
+        f"📅 Время: <b>{now}</b>"
+    )
+    try:
+        await bot.send_message(SUPPORT_CHAT_ID, notify_text, parse_mode="HTML", disable_web_page_preview=True)
+    except Exception as e:
+        logging.error(f"Invoice notify error: {e}")
+
+
+@dp.callback_query(F.data.startswith("my_invoices:"))
+async def my_invoices_cb(call: CallbackQuery):
+    page = int(call.data.split(":")[1])
+    invoices = await db.get_user_invoices(call.from_user.id, limit=50)
+    if not invoices:
+        await call.answer("У вас нет чеков.", show_alert=True); return
+
+    per_page = 5
+    total = len(invoices)
+    start = page * per_page
+    chunk = invoices[start:start + per_page]
+
+    status_icons = {"pending": "⏳", "paid": "✅", "expired": "❌"}
+    lines = [f"🧾 <b>Ваши чеки</b> (всего: {total})\n"]
+    for inv in chunk:
+        icon = status_icons.get(inv["status"], "▪️")
+        lines.append(f"{icon} <code>{inv['token']}</code> — <b>{inv['amount']:.2f} USD</b> | {inv['created_at']}")
+
+    nav = []
+    if page > 0:
+        nav.append(InlineKeyboardButton(text="◀️", callback_data=f"my_invoices:{page-1}"))
+    total_pages = max(1, (total + per_page - 1) // per_page)
+    nav.append(InlineKeyboardButton(text=f"{page+1}/{total_pages}", callback_data="noop"))
+    if (page + 1) * per_page < total:
+        nav.append(InlineKeyboardButton(text="▶️", callback_data=f"my_invoices:{page+1}"))
+
+    kb = InlineKeyboardMarkup(inline_keyboard=[nav] if nav else [])
+    try:
+        await call.message.edit_text("\n".join(lines), parse_mode="HTML", reply_markup=kb)
+    except Exception:
+        await call.message.answer("\n".join(lines), parse_mode="HTML", reply_markup=kb)
     await call.answer()
 
-@dp.callback_query(F.data == "noop")
-async def noop(call: CallbackQuery):
-    await call.answer()
+@dp.message(Command("myinvoices"))
+async def cmd_myinvoices(message: Message):
+    invoices = await db.get_user_invoices(message.from_user.id, limit=10)
+    if not invoices:
+        await message.answer("📭 У вас нет чеков."); return
+    status_icons = {"pending": "⏳", "paid": "✅", "expired": "❌"}
+    lines = ["🧾 <b>Ваши последние чеки:</b>\n"]
+    for inv in invoices:
+        icon = status_icons.get(inv["status"], "▪️")
+        site_name = inv.get("site_name", "—")
+        lines.append(f"{icon} <b>{inv['amount']:.2f} USD</b> | {site_name} | <code>{inv['token']}</code> | {inv['created_at']}\n")
+    await message.answer("\n".join(lines), parse_mode="HTML", disable_web_page_preview=True)
 
 
 # ════════════════════════════════════════════════════════════════════════════
-# ПЕРЕДАТЬ КОШЕЛЁК / ЛОГ
+# ПОЛЕЗНАЯ ИНФОРМАЦИЯ
 # ════════════════════════════════════════════════════════════════════════════
-
-@dp.message(F.text == "📤 Передать кошелёк")
-async def log_start(message: Message, state: FSMContext):
-    await state.clear()
-    await message.answer(
-        "📤 <b>Передача лога (TRC20)</b>\n\nВведите адрес кошелька:\n▪️ TRC20 — начинается с <b>T</b>, 34 символа",
-        parse_mode="HTML", reply_markup=kb_cancel(),
-    )
-    await state.set_state(LogFSM.wallet)
-
-@dp.message(LogFSM.wallet, F.text == "❌ Отмена")
-async def log_c1(message: Message, state: FSMContext):
-    await state.clear(); await message.answer("Отменено.", reply_markup=main_menu())
-
-@dp.message(LogFSM.wallet)
-async def log_wallet(message: Message, state: FSMContext):
-    wallet = message.text.strip()
-    if not is_trc20(wallet):
-        await message.answer("❌ Неверный формат. Только TRC20 (начинается с T, 34 символа). Попробуйте снова:", parse_mode="HTML"); return
-    await state.update_data(wallet=wallet)
-    await message.answer("Введите сферу сделки:"); await state.set_state(LogFSM.deal_scope)
-
-@dp.message(LogFSM.deal_scope, F.text == "❌ Отмена")
-async def log_c2(message: Message, state: FSMContext):
-    await state.clear(); await message.answer("Отменено.", reply_markup=main_menu())
-
-@dp.message(LogFSM.deal_scope)
-async def log_scope(message: Message, state: FSMContext):
-    await state.update_data(deal_scope=message.text.strip())
-    await message.answer("Введите сумму сделки (в USDT):"); await state.set_state(LogFSM.deal_amount)
-
-@dp.message(LogFSM.deal_amount, F.text == "❌ Отмена")
-async def log_c3(message: Message, state: FSMContext):
-    await state.clear(); await message.answer("Отменено.", reply_markup=main_menu())
-
-@dp.message(LogFSM.deal_amount)
-async def log_amount(message: Message, state: FSMContext):
-    await state.update_data(deal_amount=message.text.strip())
-    await message.answer("Введите баланс кошелька:"); await state.set_state(LogFSM.wallet_balance)
-
-@dp.message(LogFSM.wallet_balance, F.text == "❌ Отмена")
-async def log_c4(message: Message, state: FSMContext):
-    await state.clear(); await message.answer("Отменено.", reply_markup=main_menu())
-
-@dp.message(LogFSM.wallet_balance)
-async def log_balance(message: Message, state: FSMContext):
-    await state.update_data(wallet_balance=message.text.strip())
-    await message.answer("Выберите тип кошелька:", reply_markup=kb_wallet_type()); await state.set_state(LogFSM.wallet_type)
-
-@dp.callback_query(LogFSM.wallet_type, F.data.startswith("wtype_"))
-async def log_wtype(call: CallbackQuery, state: FSMContext):
-    await state.update_data(wallet_type="Личный" if call.data == "wtype_personal" else "Биржа")
-    await call.message.answer("Укажите от чьего лица вы общаетесь:", reply_markup=kb_gender())
-    await call.answer(); await state.set_state(LogFSM.gender)
-
-@dp.callback_query(LogFSM.gender, F.data.startswith("gender_"))
-async def log_gender(call: CallbackQuery, state: FSMContext):
-    await state.update_data(gender="Мужчина" if call.data == "gender_male" else "Женщина")
-    await call.message.answer("Введите язык общения с клиентом:\n<i>Например: Русский, Английский</i>", parse_mode="HTML", reply_markup=kb_cancel())
-    await call.answer(); await state.set_state(LogFSM.language)
-
-@dp.message(LogFSM.language, F.text == "❌ Отмена")
-async def log_c5(message: Message, state: FSMContext):
-    await state.clear(); await message.answer("Отменено.", reply_markup=main_menu())
-
-@dp.message(LogFSM.language)
-async def log_lang(message: Message, state: FSMContext):
-    await state.update_data(language=message.text.strip())
-    await message.answer("Введите страну клиента:\n<i>Например: Germany, США</i>", parse_mode="HTML"); await state.set_state(LogFSM.country)
-
-@dp.message(LogFSM.country, F.text == "❌ Отмена")
-async def log_c6(message: Message, state: FSMContext):
-    await state.clear(); await message.answer("Отменено.", reply_markup=main_menu())
-
-@dp.message(LogFSM.country)
-async def log_country(message: Message, state: FSMContext):
-    await state.update_data(country=message.text.strip())
-    await message.answer("Введите ваш номер или логин Instagram:\n<i>Пример: +48123123123 или @instagram</i>", parse_mode="HTML"); await state.set_state(LogFSM.contact)
-
-@dp.message(LogFSM.contact, F.text == "❌ Отмена")
-async def log_c7(message: Message, state: FSMContext):
-    await state.clear(); await message.answer("Отменено.", reply_markup=main_menu())
-
-@dp.message(LogFSM.contact)
-async def log_contact(message: Message, state: FSMContext):
-    await state.update_data(contact=message.text.strip())
-    await message.answer("Выберите мессенджер клиента:", reply_markup=kb_messenger()); await state.set_state(LogFSM.messenger)
-
-@dp.callback_query(LogFSM.messenger, F.data.startswith("msg_"))
-async def log_msg(call: CallbackQuery, state: FSMContext):
-    msg_map = {"msg_telegram": "Telegram", "msg_whatsapp": "WhatsApp", "msg_instagram": "Instagram"}
-    messenger = msg_map[call.data]
-    await state.update_data(messenger=messenger)
-    await call.answer()
-    await call.message.answer("Введите номер клиента:" if messenger == "WhatsApp" else "Введите username клиента (без @):", reply_markup=kb_cancel())
-    await state.set_state(LogFSM.client_contact)
-
-@dp.message(LogFSM.client_contact, F.text == "❌ Отмена")
-async def log_c8(message: Message, state: FSMContext):
-    await state.clear(); await message.answer("Отменено.", reply_markup=main_menu())
-
-@dp.message(LogFSM.client_contact)
-async def log_client(message: Message, state: FSMContext):
-    await state.update_data(client_contact=message.text.strip())
-    await message.answer("📝 Есть ли дополнительная информация по логу?", reply_markup=kb_extra_yn()); await state.set_state(LogFSM.extra_yn)
-
-@dp.callback_query(LogFSM.extra_yn, F.data == "extra_yes")
-async def log_extra_yes(call: CallbackQuery, state: FSMContext):
-    await call.message.answer("📝 Введите дополнительную информацию:", reply_markup=kb_cancel())
-    await call.answer(); await state.set_state(LogFSM.extra_info)
-
-@dp.callback_query(LogFSM.extra_yn, F.data == "extra_no")
-async def log_extra_no(call: CallbackQuery, state: FSMContext):
-    await state.update_data(extra_info=""); await call.answer()
-    await finish_log(call.message, state, call.from_user)
-
-@dp.message(LogFSM.extra_info, F.text == "❌ Отмена")
-async def log_c9(message: Message, state: FSMContext):
-    await state.clear(); await message.answer("Отменено.", reply_markup=main_menu())
-
-@dp.message(LogFSM.extra_info)
-async def log_extra(message: Message, state: FSMContext):
-    await state.update_data(extra_info=message.text.strip())
-    await finish_log(message, state, message.from_user)
-
-
-async def finish_log(message, state: FSMContext, from_user):
-    data = await state.get_data()
-    await state.clear()
-    user = await db.get_user(from_user.id)
-    data["user_id"] = from_user.id
-    data["user_tag"] = user["tag"] if user else str(from_user.id)
-    log_number = await db.save_log(data)
-
-    await message.answer(
-        "✅ <b>Лог успешно сохранён и отправлен администраторам.</b>\n\n🕐 Среднее время взятия лога в работу сегодня: ~1 мин.",
-        parse_mode="HTML", reply_markup=main_menu(),
-    )
-
-    extra = f"\n📝 Доп. инфо: <b>{data['extra_info']}</b>" if data.get("extra_info") else ""
-    tag = f"@{from_user.username}" if from_user.username else f"<a href='tg://user?id={from_user.id}'>{from_user.full_name}</a>"
-    admin_text = (
-        f"📋 <b>Новый лог #{log_number}</b>\n"
-        f"━━━━━━━━━━━━━━━━━\n"
-        f"👤 Воркер: {tag} | <b>{data['user_tag']}</b>\n"
-        f"🆔 ID: <code>{from_user.id}</code>\n"
-        f"━━━━━━━━━━━━━━━━━\n"
-        f"💼 Кошелёк: <code>{data['wallet']}</code>\n"
-        f"🔖 Тип: <b>{data['wallet_type']}</b> | 💰 Баланс: <b>{data['wallet_balance']} USDT</b>\n"
-        f"📦 Сфера: <b>{data['deal_scope']}</b> | 💵 Сумма: <b>{data['deal_amount']} USDT</b>\n"
-        f"━━━━━━━━━━━━━━━━━\n"
-        f"🧍 От лица: <b>{data['gender']}</b> | 🌐 Язык: <b>{data['language']}</b>\n"
-        f"🌍 Страна: <b>{data['country']}</b>\n"
-        f"📞 Контакт воркера: <b>{data['contact']}</b>\n"
-        f"📱 {data['messenger']}: <b>{data['client_contact']}</b>"
-        f"{extra}"
-    )
-    for chat_id in [ADMIN_CHAT_ID, SUPPORT_CHAT_ID]:
-        try:
-            await bot.send_message(chat_id, admin_text, reply_markup=kb_log_admin(log_number), parse_mode="HTML")
-        except Exception as e:
-            logging.error(f"Log send error to {chat_id}: {e}")
-
-
-# ─── Лог: взять / не брать ────────────────────────────────────────────────────
-
-@dp.callback_query(F.data.startswith("log_take:"))
-async def log_take(call: CallbackQuery):
-    log_number = call.data.split(":")[1]
-    log = await db.get_log(log_number)
-    if not log:
-        await call.answer("Лог не найден.", show_alert=True); return
-    if log["status"] != "pending":
-        who = f"@{log['support_username']}" if log.get("support_username") else "другой саппорт"
-        await call.answer(f"Лог уже взят — {who}", show_alert=True); return
-    sup = call.from_user.username or str(call.from_user.id)
-    await db.take_log(log_number, call.from_user.id, sup)
-    try:
-        await bot.send_message(log["user_id"], f"🔔 <b>Ваш лог #{log_number} принят в обработку.</b>\n\nСаппорт: @{sup}\nСтатус: <b>В обработке</b>", parse_mode="HTML")
-    except Exception: pass
-    try:
-        await call.message.edit_reply_markup(reply_markup=kb_log_result(log_number))
-    except Exception: pass
-    await call.answer(f"Лог #{log_number} взят! (@{sup})", show_alert=True)
-
-@dp.callback_query(F.data.startswith("log_skip:"))
-async def log_skip(call: CallbackQuery, state: FSMContext):
-    log_number = call.data.split(":")[1]
-    log = await db.get_log(log_number)
-    if log and log["status"] != "pending":
-        who = f"@{log['support_username']}" if log.get("support_username") else "другой саппорт"
-        await call.answer(f"Лог уже взят — {who}", show_alert=True); return
-    await state.update_data(skip_log=log_number)
-    await call.message.answer("Укажите причину или /skip:", reply_markup=kb_cancel())
-    await call.answer(); await state.set_state(RejectLog.reason)
-
-@dp.message(RejectLog.reason, F.text == "❌ Отмена")
-async def rej_cancel(message: Message, state: FSMContext):
-    await state.clear(); await message.answer("Отменено.", reply_markup=main_menu())
-
-@dp.message(RejectLog.reason, Command("skip"))
-async def rej_skip(message: Message, state: FSMContext):
-    data = await state.get_data()
-    log_number = data.get("skip_log")
-    await state.clear()
-    await message.answer("Пропущено.", reply_markup=main_menu())
-    if log_number:
-        log = await db.get_log(log_number)
-        if log:
-            sup = message.from_user.username or str(message.from_user.id)
-            try:
-                await bot.send_message(
-                    log["user_id"],
-                    f"❌ <b>Саппорт отказался от вашего лога #{log_number}.</b>\n\nСаппорт: @{sup}\nПричина: не указана\n\nПопробуйте отправить лог позже.",
-                    parse_mode="HTML",
-                )
-            except Exception: pass
-
-@dp.message(RejectLog.reason)
-async def rej_reason(message: Message, state: FSMContext):
-    data = await state.get_data()
-    log_number = data.get("skip_log")
-    reason = message.text.strip()
-    await state.clear()
-    await message.answer("✅ Причина записана.", reply_markup=main_menu())
-    if log_number:
-        log = await db.get_log(log_number)
-        if log:
-            sup = message.from_user.username or str(message.from_user.id)
-            try:
-                await bot.send_message(
-                    log["user_id"],
-                    f"❌ <b>Саппорт отказался от вашего лога #{log_number}.</b>\n\nСаппорт: @{sup}\nПричина: {reason}\n\nПопробуйте отправить лог позже.",
-                    parse_mode="HTML",
-                )
-            except Exception: pass
-
-
-# ─── Лог: результат ──────────────────────────────────────────────────────────
-
-@dp.callback_query(F.data.startswith("log_success:"))
-async def log_success(call: CallbackQuery):
-    log_number = call.data.split(":")[1]
-    log = await db.get_log(log_number)
-    if not log:
-        await call.answer("Лог не найден.", show_alert=True); return
-    if log["status"] in ("success", "fail", "invalid"):
-        await call.answer(f"Лог уже обработан: {log['status']}", show_alert=True); return
-    await db.set_log_result(log_number, "success")
-    try:
-        await bot.send_message(log["user_id"], f"✅ <b>Лог #{log_number} — Успешный!</b>", parse_mode="HTML")
-    except Exception as e:
-        logging.error(f"log_success: {e}")
-    try:
-        await call.message.edit_reply_markup(reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="✅ Успешный", callback_data="done")]]))
-    except Exception: pass
-    await call.answer("Успешный.", show_alert=True)
-
-@dp.callback_query(F.data.startswith("log_fail:"))
-async def log_fail(call: CallbackQuery):
-    log_number = call.data.split(":")[1]
-    log = await db.get_log(log_number)
-    if not log:
-        await call.answer("Лог не найден.", show_alert=True); return
-    if log["status"] in ("success", "fail", "invalid"):
-        await call.answer(f"Лог уже обработан: {log['status']}", show_alert=True); return
-    await db.set_log_result(log_number, "fail")
-    try:
-        await bot.send_message(log["user_id"], f"❌ <b>Лог #{log_number} — Неуспешный.</b>", parse_mode="HTML")
-    except Exception as e:
-        logging.error(f"log_fail: {e}")
-    try:
-        await call.message.edit_reply_markup(reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="❌ Неуспешный", callback_data="done")]]))
-    except Exception: pass
-    await call.answer("Неуспешный.", show_alert=True)
-
-@dp.callback_query(F.data.startswith("log_invalid:"))
-async def log_invalid(call: CallbackQuery):
-    log_number = call.data.split(":")[1]
-    log = await db.get_log(log_number)
-    if not log:
-        await call.answer("Лог не найден.", show_alert=True); return
-    if log["status"] in ("success", "fail", "invalid"):
-        await call.answer(f"Лог уже обработан: {log['status']}", show_alert=True); return
-    await db.set_log_result(log_number, "invalid")
-    try:
-        await bot.send_message(log["user_id"], f"🚫 <b>Лог #{log_number} — Не валидный.</b>", parse_mode="HTML")
-    except Exception as e:
-        logging.error(f"log_invalid: {e}")
-    try:
-        await call.message.edit_reply_markup(reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="🚫 Не валидный", callback_data="done")]]))
-    except Exception: pass
-    await call.answer("Не валидный.", show_alert=True)
-
-
-# ─── Полезная информация ──────────────────────────────────────────────────────
 
 @dp.message(F.text == "💡 Полезная информация")
 async def useful_info(message: Message):
@@ -823,7 +529,7 @@ async def tools_back(call: CallbackQuery):
 @dp.callback_query(F.data == "tool_phone")
 async def tool_phone(call: CallbackQuery, state: FSMContext):
     await call.message.answer(
-        "📱 <b>Введите номер телефона</b>\n\nФормат:\n<code>+921111999922</code> или <code>9228888231</code>\n\n<i>Указывайте с кодом страны.</i>",
+        "📱 <b>Введите номер телефона</b>\n\nФормат: <code>+921111999922</code>",
         parse_mode="HTML",
     )
     await call.answer(); await state.set_state(CheckPhone.waiting)
@@ -848,141 +554,151 @@ async def tool_phone_process(message: Message, state: FSMContext):
 async def reserve_ch(message: Message):
     await message.answer(f"📡 <b>Резервный канал:</b>\n{RESERVE_CHANNEL}", parse_mode="HTML")
 
+@dp.callback_query(F.data == "noop")
+async def noop(call: CallbackQuery): await call.answer()
+
+@dp.callback_query(F.data == "done")
+async def cb_done(call: CallbackQuery): await call.answer()
+
 
 # ════════════════════════════════════════════════════════════════════════════
-# АДМИН КОМАНДЫ
+# АДМИН: УПРАВЛЕНИЕ САЙТАМИ
 # ════════════════════════════════════════════════════════════════════════════
 
-@dp.message(Command("mystats"))
-async def cmd_mystats(message: Message):
-    user = await db.get_user(message.from_user.id)
-    if not user:
-        await message.answer("❌ Вы не зарегистрированы в боте."); return
-    pool = await db.get_pool()
-    async with pool.acquire() as conn:
-        total = await conn.fetchval("SELECT COUNT(*) FROM user_logs WHERE user_id=$1", message.from_user.id)
-        success = await conn.fetchval("SELECT COUNT(*) FROM user_logs WHERE user_id=$1 AND status='success'", message.from_user.id)
-        fail = await conn.fetchval("SELECT COUNT(*) FROM user_logs WHERE user_id=$1 AND status='fail'", message.from_user.id)
-        invalid = await conn.fetchval("SELECT COUNT(*) FROM user_logs WHERE user_id=$1 AND status='invalid'", message.from_user.id)
-    counted = (success or 0) + (fail or 0)
-    success_pct = round((success or 0) / counted * 100, 1) if counted > 0 else 0
-    text = (
-        f"📊 <b>Ваша статистика</b> — <b>{user['tag']}</b>\n\n"
-        f"📋 Логов всего: <b>{total or 0}</b>\n"
-        f"✅ Успешных: <b>{success or 0}</b>\n"
-        f"❌ Неуспешных: <b>{fail or 0}</b>\n"
-        f"🚫 Не валидных: <b>{invalid or 0}</b>\n"
-        f"📈 Процент успеха: <b>{success_pct}%</b>\n\n"
-        f"💰 Сумма выплат: <b>{user['payout_sum']:.2f} USDT</b>\n"
-        f"🧾 Кол-во выплат: <b>{user['payout_count']}</b>"
+@dp.message(Command("sites"))
+async def admin_sites(message: Message):
+    if not is_admin(message.from_user.id): return
+    sites = await db.get_all_sites()
+    if not sites:
+        await message.answer(
+            "🌐 <b>Сайты для чеков</b>\n\nСписок пуст.\n\nДобавить: /addsite",
+            parse_mode="HTML"
+        ); return
+    lines = ["🌐 <b>Сайты для чеков:</b>\n"]
+    for s in sites:
+        status = "✅ Активен" if s["active"] else "❌ Отключён"
+        lines.append(f"<b>{s['id']}. {s['name']}</b> — {status}\n   🔗 {s['domain']}")
+    lines.append("\n/addsite — добавить\n/delsite ID — удалить\n/togglesite ID — вкл/выкл")
+    await message.answer("\n".join(lines), parse_mode="HTML", disable_web_page_preview=True)
+
+@dp.message(Command("addsite"))
+async def admin_addsite_start(message: Message, state: FSMContext):
+    if not is_admin(message.from_user.id): return
+    await message.answer(
+        "🌐 <b>Добавление сайта</b>\n\nВведите название сайта:\n<i>Например: Heleket</i>",
+        parse_mode="HTML", reply_markup=kb_cancel()
     )
-    await message.answer(text, parse_mode="HTML")
+    await state.set_state(AddSiteFSM.name)
 
+@dp.message(AddSiteFSM.name, F.text == "❌ Отмена")
+async def addsite_cancel(message: Message, state: FSMContext):
+    await state.clear(); await message.answer("Отменено.", reply_markup=main_menu())
 
-@dp.message(Command("userinfo"))
-async def admin_userinfo(message: Message):
+@dp.message(AddSiteFSM.name)
+async def addsite_name(message: Message, state: FSMContext):
+    await state.update_data(name=message.text.strip())
+    await message.answer(
+        "🔗 Введите домен сайта:\n<i>Например: https://pay.example.com</i>",
+        parse_mode="HTML"
+    )
+    await state.set_state(AddSiteFSM.domain)
+
+@dp.message(AddSiteFSM.domain, F.text == "❌ Отмена")
+async def addsite_domain_cancel(message: Message, state: FSMContext):
+    await state.clear(); await message.answer("Отменено.", reply_markup=main_menu())
+
+@dp.message(AddSiteFSM.domain)
+async def addsite_domain(message: Message, state: FSMContext):
+    domain = message.text.strip().rstrip("/")
+    if not domain.startswith("http"):
+        await message.answer("❌ Домен должен начинаться с http:// или https://"); return
+    data = await state.get_data()
+    await state.clear()
+    site_id = await db.add_site(data["name"], domain)
+    await message.answer(
+        f"✅ <b>Сайт добавлен!</b>\n\n"
+        f"🆔 ID: <b>{site_id}</b>\n"
+        f"📛 Название: <b>{data['name']}</b>\n"
+        f"🔗 Домен: <code>{domain}</code>\n"
+        f"✅ Статус: Активен",
+        parse_mode="HTML", reply_markup=main_menu()
+    )
+
+@dp.message(Command("delsite"))
+async def admin_delsite(message: Message):
     if not is_admin(message.from_user.id): return
     args = message.text.split()
     if len(args) != 2:
-        await message.answer("Использование: /userinfo тег"); return
-    tag = args[1].lstrip("@")
-    user = await db.get_user_by_tag(tag)
-    if not user:
-        await message.answer("❌ Пользователь не найден."); return
-    pool = await db.get_pool()
-    async with pool.acquire() as conn:
-        total = await conn.fetchval("SELECT COUNT(*) FROM user_logs WHERE user_id=$1", user["user_id"])
-        success = await conn.fetchval("SELECT COUNT(*) FROM user_logs WHERE user_id=$1 AND status='success'", user["user_id"])
-        fail = await conn.fetchval("SELECT COUNT(*) FROM user_logs WHERE user_id=$1 AND status='fail'", user["user_id"])
-        invalid = await conn.fetchval("SELECT COUNT(*) FROM user_logs WHERE user_id=$1 AND status='invalid'", user["user_id"])
-        pending = await conn.fetchval("SELECT COUNT(*) FROM user_logs WHERE user_id=$1 AND status='pending'", user["user_id"])
-    counted = (success or 0) + (fail or 0)
-    success_pct = round((success or 0) / counted * 100, 1) if counted > 0 else 0
-    banned = await db.is_banned(user["user_id"])
-    mentor_str = "❌"
-    if user.get("mentor_id"):
-        mentor = await db.get_mentor(user["mentor_id"])
-        if mentor:
-            left = user.get("mentor_payouts_left", 0)
-            mentor_str = f"@{mentor['username']} (осталось: {left})"
-    username_str = f"@{user['username']}" if user.get("username") else "—"
-    text = (
-        f"👤 <b>Информация о пользователе</b>\n\n"
-        f"⭐️ Тег: <b>{user['tag']}</b>\n"
-        f"🔗 Username: {username_str}\n"
-        f"🆔 ID: <code>{user['user_id']}</code>\n"
-        f"📅 В команде с: <b>{user.get('joined_at', '—')}</b>\n"
-        f"🚫 Заблокирован: <b>{'Да' if banned else 'Нет'}</b>\n\n"
-        f"━━━━━━━━━━━━━━━━━\n"
-        f"📋 Логов всего: <b>{total or 0}</b>\n"
-        f"✅ Успешных: <b>{success or 0}</b>\n"
-        f"❌ Неуспешных: <b>{fail or 0}</b>\n"
-        f"🚫 Не валидных: <b>{invalid or 0}</b>\n"
-        f"⏳ На рассмотрении: <b>{pending or 0}</b>\n"
-        f"📈 Процент успеха: <b>{success_pct}%</b>\n\n"
-        f"━━━━━━━━━━━━━━━━━\n"
-        f"💰 Сумма выплат: <b>{user['payout_sum']:.2f} USDT</b>\n"
-        f"🧾 Кол-во выплат: <b>{user['payout_count']}</b>\n"
-        f"📊 Процент выплат: <b>{int(user['payout_pct'])}%</b>\n"
-        f"🤝 Наставник: <b>{mentor_str}</b>"
-    )
-    await message.answer(text, parse_mode="HTML")
+        await message.answer("Использование: /delsite ID"); return
+    try:
+        site_id = int(args[1])
+    except ValueError:
+        await message.answer("ID должен быть числом."); return
+    ok = await db.delete_site(site_id)
+    if ok:
+        await message.answer(f"✅ Сайт #{site_id} удалён.")
+    else:
+        await message.answer(f"❌ Сайт #{site_id} не найден.")
 
-
-@dp.message(Command("work"))
-async def admin_work(message: Message):
+@dp.message(Command("togglesite"))
+async def admin_togglesite(message: Message):
     if not is_admin(message.from_user.id): return
-    await db.set_setting("work_mode", "Дневной ворк")
-    text = "START WORK 🟢\n\nВсем заряду и побольше клиентов!"
-    for chat_id in [ADMIN_CHAT_ID, SUPPORT_CHAT_ID, WORKERS_CHAT_ID]:
-        try: await bot.send_message(chat_id, text)
-        except Exception: pass
-    await message.answer(f"✅ {text}")
+    args = message.text.split()
+    if len(args) != 2:
+        await message.answer("Использование: /togglesite ID"); return
+    try:
+        site_id = int(args[1])
+    except ValueError:
+        await message.answer("ID должен быть числом."); return
+    site = await db.toggle_site(site_id)
+    if not site:
+        await message.answer(f"❌ Сайт #{site_id} не найден."); return
+    status = "✅ Активен" if site["active"] else "❌ Отключён"
+    await message.answer(f"🔄 Сайт <b>{site['name']}</b>: {status}", parse_mode="HTML")
 
 
-@dp.message(Command("stopwork"))
-async def admin_stopwork(message: Message):
-    if not is_admin(message.from_user.id): return
-    await db.set_setting("work_mode", "Стоп ворк")
-    text = "STOP WORK 🔴\n\nКоманда остановила работу. Логи не принимаются."
-    for chat_id in [ADMIN_CHAT_ID, SUPPORT_CHAT_ID, WORKERS_CHAT_ID]:
-        try: await bot.send_message(chat_id, text)
-        except Exception: pass
-    await message.answer(f"✅ {text}")
-
+# ════════════════════════════════════════════════════════════════════════════
+# АДМИН: ОСНОВНЫЕ КОМАНДЫ
+# ════════════════════════════════════════════════════════════════════════════
 
 @dp.message(Command("adminhelp"))
 async def admin_help(message: Message):
     if not is_admin(message.from_user.id): return
     await message.answer(
         "📋 <b>Все админские команды:</b>\n\n"
-        "━━ Управление ━━\n"
-        "/setmode день|ночь|стоп\n"
+        "━━ Режим работы ━━\n"
+        "/setmode день|ночь|стоп\n\n"
+        "━━ Сайты для чеков ━━\n"
+        "/sites — список сайтов\n"
+        "/addsite — добавить сайт\n"
+        "/delsite ID — удалить сайт\n"
+        "/togglesite ID — вкл/выкл сайт\n\n"
+        "━━ Чеки ━━\n"
+        "/invoices — последние 20 чеков\n\n"
+        "━━ Выплаты ━━\n"
+        "/pay тег 500\n"
+        "/delpay тег 500\n"
         "/setpct 70 — процент всем\n"
         "/setpct тег 70 — конкретному\n"
-        "/pay тег 500 — выплата\n"
-        "/delpay тег 500 — удалить выплату\n"
-        "/setcash 1234 — касса\n\n"
+        "/setcash 1234\n\n"
         "━━ Пользователи ━━\n"
+        "/userinfo тег\n"
         "/ban тег [причина]\n"
         "/unban тег\n\n"
         "━━ Саппорты ━━\n"
         "/addsupport @username\n"
         "/delsupport @username\n\n"
         "━━ Наставники ━━\n"
-        "/addmentor тег @username процент [описание]\n"
-        "/delmentor тег — снять с ученика\n"
-        "/delmentorglobal тег — удалить из команды\n"
+        "/addmentor тег @username процент\n"
+        "/delmentor тег\n"
+        "/delmentorglobal тег\n"
         "/setmentorfee тег процент\n"
         "/setmentorbio тег текст\n\n"
         "━━ Роли (инструктаж) ━━\n"
         "/setrole creator|moderator|developer @username\n"
         "/setmentors @user1 @user2\n\n"
         "━━ Рассылка ━━\n"
-        "/broadcast\n"
-        "\n━━ Чеки ━━\n"
-        "/setdomain https://example.com — домен для чеков\n"
-        "/invoices — последние 20 чеков\n",
+        "/broadcast\n",
         parse_mode="HTML",
     )
 
@@ -998,6 +714,23 @@ async def admin_setmode(message: Message):
         await message.answer("Варианты: день | ночь | стоп"); return
     await db.set_setting("work_mode", mode)
     await message.answer(f"✅ Режим: <b>{mode}</b>", parse_mode="HTML")
+
+@dp.message(Command("invoices"))
+async def admin_invoices(message: Message):
+    if not is_admin(message.from_user.id): return
+    invoices = await db.get_all_invoices(limit=20)
+    if not invoices:
+        await message.answer("📭 Чеков нет."); return
+    status_icons = {"pending": "⏳", "paid": "✅", "expired": "❌"}
+    lines = ["🧾 <b>Последние 20 чеков:</b>\n"]
+    for inv in invoices:
+        icon = status_icons.get(inv["status"], "▪️")
+        site_name = inv.get("site_name", "—")
+        lines.append(
+            f"{icon} <b>{inv['user_tag']}</b> | <b>{inv['amount']:.2f} USD</b> | {site_name}\n"
+            f"   🔑 <code>{inv['token']}</code> | 📅 {inv['created_at']}\n"
+        )
+    await message.answer("\n".join(lines), parse_mode="HTML", disable_web_page_preview=True)
 
 @dp.message(Command("setpct"))
 async def admin_setpct(message: Message):
@@ -1037,7 +770,6 @@ async def admin_pay(message: Message):
     worker_share = round(amount * pct / 100, 2)
     mentor_info = await db.add_payout(user["user_id"], amount)
 
-    # Сообщение воркеру
     mentor_line = ""
     if mentor_info.get("mentor_id"):
         mentor_line = f"\n💼 Доля наставника ({mentor_info['fee_pct']}%): <b>{fmt(mentor_info['mentor_fee'])} USDT</b>"
@@ -1052,7 +784,6 @@ async def admin_pay(message: Message):
     except Exception:
         await bot.send_message(user["user_id"], worker_text, parse_mode="HTML")
 
-    # Уведомление наставнику
     if mentor_info.get("mentor_id"):
         try:
             removed_text = "\n\n✅ Обучение завершено — ученик снят." if mentor_info.get("mentor_removed") else ""
@@ -1063,7 +794,6 @@ async def admin_pay(message: Message):
             )
         except Exception: pass
 
-    # В канал выплат
     mentor_channel_line = f"\n👨‍🏫 Доля наставника @{mentor_info['mentor_username']} ({mentor_info['fee_pct']}%): <b>{fmt(mentor_info['mentor_fee'])} USDT</b>" if mentor_info.get("mentor_id") else ""
     payout_text = f"💳 <b>Новая оплата</b>\n\n👤 Тег: <b>{tag}</b>\n💰 Сумма: <b>{fmt(amount)} USDT</b>\n📊 Доля воркера ({int(pct)}%): <b>{fmt(worker_share)} USDT</b>{mentor_channel_line}"
     try:
@@ -1072,7 +802,6 @@ async def admin_pay(message: Message):
         sent = await bot.send_photo(PAYOUTS_CHANNEL, photo=photo, caption=payout_text, parse_mode="HTML")
     except Exception:
         sent = await bot.send_message(PAYOUTS_CHANNEL, payout_text, parse_mode="HTML")
-    # Дублируем в чат воркеров
     try:
         await bot.forward_message(WORKERS_CHAT_ID, PAYOUTS_CHANNEL, sent.message_id)
     except Exception:
@@ -1111,6 +840,68 @@ async def admin_setcash(message: Message):
         await message.answer(f"✅ Касса: <b>{val} USDT</b>", parse_mode="HTML")
     except ValueError: await message.answer("Сумма — число.")
 
+@dp.message(Command("userinfo"))
+async def admin_userinfo(message: Message):
+    if not is_admin(message.from_user.id): return
+    args = message.text.split()
+    if len(args) != 2:
+        await message.answer("Использование: /userinfo тег"); return
+    tag = args[1].lstrip("@")
+    user = await db.get_user_by_tag(tag)
+    if not user:
+        await message.answer("❌ Пользователь не найден."); return
+    banned = await db.is_banned(user["user_id"])
+    mentor_str = "❌"
+    if user.get("mentor_id"):
+        mentor = await db.get_mentor(user["mentor_id"])
+        if mentor:
+            left = user.get("mentor_payouts_left", 0)
+            mentor_str = f"@{mentor['username']} (осталось: {left})"
+    username_str = f"@{user['username']}" if user.get("username") else "—"
+    text = (
+        f"👤 <b>Информация о пользователе</b>\n\n"
+        f"⭐️ Тег: <b>{user['tag']}</b>\n"
+        f"🔗 Username: {username_str}\n"
+        f"🆔 ID: <code>{user['user_id']}</code>\n"
+        f"📅 В команде с: <b>{user.get('joined_at', '—')}</b>\n"
+        f"🚫 Заблокирован: <b>{'Да' if banned else 'Нет'}</b>\n\n"
+        f"💰 Сумма выплат: <b>{user['payout_sum']:.2f} USDT</b>\n"
+        f"🧾 Кол-во выплат: <b>{user['payout_count']}</b>\n"
+        f"📊 Процент выплат: <b>{int(user['payout_pct'])}%</b>\n"
+        f"🤝 Наставник: <b>{mentor_str}</b>"
+    )
+    await message.answer(text, parse_mode="HTML")
+
+@dp.message(Command("ban"))
+async def admin_ban(message: Message):
+    if not is_admin(message.from_user.id): return
+    args = message.text.split(maxsplit=2)
+    if len(args) < 2:
+        await message.answer("Использование: /ban тег [причина]"); return
+    tag = args[1].lstrip("@"); reason = args[2] if len(args) > 2 else ""
+    user = await db.get_user_by_tag(tag)
+    if not user:
+        await message.answer("❌ Не найден."); return
+    await db.ban_user(user["user_id"], reason)
+    reason_text = f"\nПричина: {reason}" if reason else ""
+    await message.answer(f"✅ <b>{tag}</b> заблокирован.{reason_text}", parse_mode="HTML")
+    try: await bot.send_message(user["user_id"], f"🚫 <b>Вы заблокированы.</b>{reason_text}", parse_mode="HTML")
+    except Exception: pass
+
+@dp.message(Command("unban"))
+async def admin_unban(message: Message):
+    if not is_admin(message.from_user.id): return
+    args = message.text.split()
+    if len(args) < 2:
+        await message.answer("Использование: /unban тег"); return
+    user = await db.get_user_by_tag(args[1].lstrip("@"))
+    if not user:
+        await message.answer("❌ Не найден."); return
+    await db.unban_user(user["user_id"])
+    await message.answer(f"✅ <b>{args[1]}</b> разблокирован.", parse_mode="HTML")
+    try: await bot.send_message(user["user_id"], "✅ <b>Блокировка снята.</b>", parse_mode="HTML")
+    except Exception: pass
+
 @dp.message(Command("addsupport"))
 async def admin_addsupport(message: Message):
     if not is_admin(message.from_user.id): return
@@ -1141,15 +932,13 @@ async def admin_delsupport(message: Message):
     await db.del_support(row["user_id"])
     await message.answer(f"✅ @{username} удалён из саппортов.")
 
-# /addmentor тег @username процент [описание]
 @dp.message(Command("addmentor"))
 async def admin_addmentor(message: Message):
     if not is_admin(message.from_user.id): return
     args = message.text.split(maxsplit=4)
     if len(args) < 4:
         await message.answer("Использование: /addmentor тег @username процент [описание]"); return
-    tag = args[1].lstrip("@")
-    username = args[2].lstrip("@")
+    tag = args[1].lstrip("@"); username = args[2].lstrip("@")
     try: fee_pct = float(args[3])
     except ValueError:
         await message.answer("Процент — число."); return
@@ -1200,49 +989,19 @@ async def admin_setmentorfee(message: Message):
     except ValueError:
         await message.answer("Процент — число."); return
     await db.set_mentor_fee(mentor["user_id"], fee)
-    await message.answer(f"✅ Комиссия наставника <b>{args[1]}</b> установлена: <b>{fee}%</b>", parse_mode="HTML")
+    await message.answer(f"✅ Комиссия наставника <b>{args[1]}</b>: <b>{fee}%</b>", parse_mode="HTML")
 
 @dp.message(Command("setmentorbio"))
 async def admin_setmentorbio(message: Message):
     if not is_admin(message.from_user.id): return
     args = message.text.split(maxsplit=2)
     if len(args) < 3:
-        await message.answer("Использование: /setmentorbio тег текст описания"); return
+        await message.answer("Использование: /setmentorbio тег текст"); return
     mentor = await db.get_mentor_by_tag(args[1].lstrip("@"))
     if not mentor:
         await message.answer("❌ Наставник не найден."); return
     await db.set_mentor_bio(mentor["user_id"], args[2])
-    await message.answer(f"✅ Описание наставника обновлено.")
-
-@dp.message(Command("ban"))
-async def admin_ban(message: Message):
-    if not is_admin(message.from_user.id): return
-    args = message.text.split(maxsplit=2)
-    if len(args) < 2:
-        await message.answer("Использование: /ban тег [причина]"); return
-    tag = args[1].lstrip("@"); reason = args[2] if len(args) > 2 else ""
-    user = await db.get_user_by_tag(tag)
-    if not user:
-        await message.answer("❌ Не найден."); return
-    await db.ban_user(user["user_id"], reason)
-    reason_text = f"\nПричина: {reason}" if reason else ""
-    await message.answer(f"✅ <b>{tag}</b> заблокирован.{reason_text}", parse_mode="HTML")
-    try: await bot.send_message(user["user_id"], f"🚫 <b>Вы заблокированы.</b>{reason_text}", parse_mode="HTML")
-    except Exception: pass
-
-@dp.message(Command("unban"))
-async def admin_unban(message: Message):
-    if not is_admin(message.from_user.id): return
-    args = message.text.split()
-    if len(args) < 2:
-        await message.answer("Использование: /unban тег"); return
-    user = await db.get_user_by_tag(args[1].lstrip("@"))
-    if not user:
-        await message.answer("❌ Не найден."); return
-    await db.unban_user(user["user_id"])
-    await message.answer(f"✅ <b>{args[1]}</b> разблокирован.", parse_mode="HTML")
-    try: await bot.send_message(user["user_id"], "✅ <b>Блокировка снята.</b>", parse_mode="HTML")
-    except Exception: pass
+    await message.answer("✅ Описание наставника обновлено.")
 
 @dp.message(Command("setrole"))
 async def admin_setrole(message: Message):
@@ -1282,29 +1041,9 @@ async def admin_addadmin(message: Message):
         ids.append(new_admin_id)
         await db.set_setting("extra_admins", ",".join(str(i) for i in ids))
     ADMIN_IDS.append(new_admin_id)
-    await message.answer(f"✅ Пользователь <code>{new_admin_id}</code> добавлен как администратор.", parse_mode="HTML")
+    await message.answer(f"✅ <code>{new_admin_id}</code> добавлен как администратор.", parse_mode="HTML")
     try: await bot.send_message(new_admin_id, "✅ <b>Вам выданы права администратора.</b>", parse_mode="HTML")
     except Exception: pass
-
-@dp.message(Command("deladmin"))
-async def admin_deladmin(message: Message):
-    if not is_admin(message.from_user.id): return
-    args = message.text.split()
-    if len(args) != 2:
-        await message.answer("Использование: /deladmin user_id"); return
-    try:
-        del_id = int(args[1])
-    except ValueError:
-        await message.answer("ID должен быть числом."); return
-    if del_id in ADMIN_IDS:
-        ADMIN_IDS.remove(del_id)
-    admins = await db.get_setting("extra_admins")
-    ids = [int(x) for x in admins.split(",") if x.strip().isdigit()] if admins else []
-    if del_id in ids:
-        ids.remove(del_id)
-        await db.set_setting("extra_admins", ",".join(str(i) for i in ids))
-    await message.answer(f"✅ Пользователь <code>{del_id}</code> удалён из администраторов.", parse_mode="HTML")
-
 
 @dp.message(Command("broadcast"))
 async def admin_broadcast(message: Message, state: FSMContext):
@@ -1329,9 +1068,6 @@ async def broadcast_send(message: Message, state: FSMContext):
         except Exception: failed += 1
     await message.answer(f"✅ Готово.\n📨 Отправлено: {sent}\n❌ Не доставлено: {failed}")
 
-
-# ── Саппорт ───────────────────────────────────────────────────────────────────
-
 @dp.message(Command("onshift"))
 async def support_onshift(message: Message):
     if not await db.is_support(message.from_user.id): return
@@ -1344,166 +1080,26 @@ async def support_offshift(message: Message):
     await db.set_support_shift(message.from_user.id, False)
     await message.answer("✅ Вы ушли со смены.")
 
-@dp.callback_query(F.data == "done")
-async def cb_done(call: CallbackQuery): await call.answer()
-
-
-# ════════════════════════════════════════════════════════════════════════════
-# ИНВОЙСЫ / ЧЕКИ
-# ════════════════════════════════════════════════════════════════════════════
-
-@dp.message(F.text == "🧾 Создать чек")
-async def invoice_start(message: Message, state: FSMContext):
-    if message.chat.type != "private":
-        return
-    if not await db.is_approved(message.from_user.id):
-        await message.answer("🚫 Доступ закрыт."); return
-    await message.answer(
-        "🧾 <b>Создание чека</b>\n\n"
-        "Введите сумму в USDT:\n"
-        "<i>Например: 50 или 150.50</i>",
-        parse_mode="HTML",
-        reply_markup=kb_cancel(),
+@dp.message(Command("mystats"))
+async def cmd_mystats(message: Message):
+    user = await db.get_user(message.from_user.id)
+    if not user:
+        await message.answer("❌ Вы не зарегистрированы."); return
+    invoices = await db.get_user_invoices(message.from_user.id, limit=100)
+    total_inv = len(invoices)
+    text = (
+        f"📊 <b>Ваша статистика</b> — <b>{user['tag']}</b>\n\n"
+        f"🧾 Чеков создано: <b>{total_inv}</b>\n"
+        f"💰 Сумма выплат: <b>{user['payout_sum']:.2f} USDT</b>\n"
+        f"🧾 Кол-во выплат: <b>{user['payout_count']}</b>"
     )
-    await state.set_state(InvoiceFSM.amount)
-
-
-@dp.message(InvoiceFSM.amount, F.text == "❌ Отмена")
-async def invoice_cancel(message: Message, state: FSMContext):
-    await state.clear()
-    await message.answer("Отменено.", reply_markup=main_menu())
-
-
-@dp.message(InvoiceFSM.amount)
-async def invoice_process(message: Message, state: FSMContext):
-    raw = message.text.strip().replace(",", ".")
-    try:
-        amount = float(raw)
-        if amount <= 0 or amount > 1_000_000:
-            raise ValueError
-        amount = round(amount, 2)
-    except ValueError:
-        await message.answer("❌ Неверная сумма. Введите число больше 0:\n<i>Например: 50 или 150.50</i>", parse_mode="HTML")
-        return
-
-    await state.clear()
-
-    user = await db.get_or_create_user(
-        message.from_user.id,
-        message.from_user.username or "",
-        message.from_user.full_name,
-    )
-
-    token = await db.create_invoice(message.from_user.id, user["tag"], amount)
-    domain = await db.get_setting("invoice_domain") or "https://example.com"
-    link = f"{domain.rstrip('/')}/?t={token}"
-
-    await message.answer(
-        f"✅ <b>Чек создан!</b>\n\n"
-        f"💰 Сумма: <b>{amount:.2f} USDT</b>\n"
-        f"🔑 Токен: <code>{token}</code>\n\n"
-        f"🔗 Ссылка:\n{link}",
-        parse_mode="HTML",
-        reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text="📋 Мои чеки", callback_data="my_invoices:0")],
-        ]),
-    )
-
-
-@dp.callback_query(F.data.startswith("my_invoices:"))
-async def my_invoices_cb(call: CallbackQuery):
-    page = int(call.data.split(":")[1])
-    invoices = await db.get_user_invoices(call.from_user.id, limit=50)
-    if not invoices:
-        await call.answer("У вас нет чеков.", show_alert=True); return
-
-    per_page = 5
-    total = len(invoices)
-    start = page * per_page
-    chunk = invoices[start:start + per_page]
-
-    status_icons = {"pending": "⏳", "paid": "✅", "expired": "❌"}
-    lines = [f"🧾 <b>Ваши чеки</b> (всего: {total})\n"]
-    for inv in chunk:
-        icon = status_icons.get(inv["status"], "▪️")
-        lines.append(f"{icon} <code>{inv['token']}</code> — <b>{inv['amount']:.2f} USDT</b> | {inv['created_at']}")
-
-    nav = []
-    if page > 0:
-        nav.append(InlineKeyboardButton(text="◀️", callback_data=f"my_invoices:{page-1}"))
-    total_pages = max(1, (total + per_page - 1) // per_page)
-    nav.append(InlineKeyboardButton(text=f"{page+1}/{total_pages}", callback_data="noop"))
-    if (page + 1) * per_page < total:
-        nav.append(InlineKeyboardButton(text="▶️", callback_data=f"my_invoices:{page+1}"))
-
-    kb = InlineKeyboardMarkup(inline_keyboard=[nav] if nav else [])
-    try:
-        await call.message.edit_text("\n".join(lines), parse_mode="HTML", reply_markup=kb)
-    except Exception:
-        await call.message.answer("\n".join(lines), parse_mode="HTML", reply_markup=kb)
-    await call.answer()
-
-
-@dp.message(Command("myinvoices"))
-async def cmd_myinvoices(message: Message):
-    invoices = await db.get_user_invoices(message.from_user.id, limit=10)
-    if not invoices:
-        await message.answer("📭 У вас нет чеков."); return
-    domain = await db.get_setting("invoice_domain") or "https://example.com"
-    status_icons = {"pending": "⏳", "paid": "✅", "expired": "❌"}
-    lines = ["🧾 <b>Ваши последние чеки:</b>\n"]
-    for inv in invoices:
-        icon = status_icons.get(inv["status"], "▪️")
-        link = f"{domain.rstrip('/')}/?t={inv['token']}"
-        lines.append(f"{icon} <b>{inv['amount']:.2f} USDT</b> | <code>{inv['token']}</code>\n   🔗 {link}\n   📅 {inv['created_at']}\n")
-    await message.answer("\n".join(lines), parse_mode="HTML", disable_web_page_preview=True)
-
-
-# ── Админ: управление доменом и просмотр всех чеков ──────────────────────────
-
-@dp.message(Command("setdomain"))
-async def admin_setdomain(message: Message):
-    if not is_admin(message.from_user.id): return
-    args = message.text.split(maxsplit=1)
-    if len(args) != 2:
-        current = await db.get_setting("invoice_domain") or "не задан"
-        await message.answer(
-            f"🌐 <b>Управление доменом чеков</b>\n\n"
-            f"Текущий домен: <code>{current}</code>\n\n"
-            f"Использование: /setdomain https://example.com",
-            parse_mode="HTML",
-        )
-        return
-    domain = args[1].strip().rstrip("/")
-    if not domain.startswith("http"):
-        await message.answer("❌ Домен должен начинаться с http:// или https://"); return
-    await db.set_setting("invoice_domain", domain)
-    await message.answer(f"✅ Домен чеков установлен:\n<code>{domain}</code>", parse_mode="HTML")
-
-
-@dp.message(Command("invoices"))
-async def admin_invoices(message: Message):
-    if not is_admin(message.from_user.id): return
-    invoices = await db.get_all_invoices(limit=20)
-    if not invoices:
-        await message.answer("📭 Чеков нет."); return
-    domain = await db.get_setting("invoice_domain") or "https://example.com"
-    status_icons = {"pending": "⏳", "paid": "✅", "expired": "❌"}
-    lines = [f"🧾 <b>Последние 20 чеков:</b>\n"]
-    for inv in invoices:
-        icon = status_icons.get(inv["status"], "▪️")
-        lines.append(
-            f"{icon} <b>{inv['user_tag']}</b> | <b>{inv['amount']:.2f} USDT</b>\n"
-            f"   🔑 <code>{inv['token']}</code> | 📅 {inv['created_at']}\n"
-        )
-    await message.answer("\n".join(lines), parse_mode="HTML", disable_web_page_preview=True)
+    await message.answer(text, parse_mode="HTML")
 
 
 # ─── Run ─────────────────────────────────────────────────────────────────────
 
 async def main():
     await db.init_db()
-    # Загружаем дополнительных админов из базы
     extra = await db.get_setting("extra_admins")
     if extra:
         for uid in extra.split(","):
