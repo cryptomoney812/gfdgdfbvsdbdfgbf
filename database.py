@@ -109,6 +109,13 @@ async def init_db():
                 created_at  TEXT NOT NULL,
                 created_date DATE DEFAULT CURRENT_DATE
             );
+
+            CREATE TABLE IF NOT EXISTS sites (
+                id      SERIAL PRIMARY KEY,
+                name    TEXT NOT NULL,
+                domain  TEXT NOT NULL,
+                active  BOOLEAN DEFAULT TRUE
+            );
         """)
         await conn.execute("""
             INSERT INTO settings (key, value) VALUES ('work_mode', 'Дневной ворк') ON CONFLICT (key) DO NOTHING;
@@ -119,6 +126,7 @@ async def init_db():
             "ALTER TABLE users ADD COLUMN IF NOT EXISTS onboarding_done BOOLEAN DEFAULT FALSE",
             "ALTER TABLE users ADD COLUMN IF NOT EXISTS mentor_payouts_left INT DEFAULT 0",
             "ALTER TABLE user_logs ADD COLUMN IF NOT EXISTS created_date DATE DEFAULT CURRENT_DATE",
+            "ALTER TABLE invoices ADD COLUMN IF NOT EXISTS site_id INT DEFAULT NULL",
         ]:
             try:
                 await conn.execute(col_sql)
@@ -588,21 +596,21 @@ def _gen_invoice_token(length: int = 8) -> str:
     return "".join(secrets.choice(alphabet) for _ in range(length))
 
 
-async def create_invoice(user_id: int, user_tag: str, amount: float) -> str:
+async def create_invoice(user_id: int, user_tag: str, amount: float, site_id: int = None) -> str:
     """Создаёт инвойс, возвращает уникальный токен."""
     pool = await get_pool()
     now = datetime.now().strftime("%d.%m.%Y %H:%M")
     today = date.today()
     async with pool.acquire() as conn:
-        for _ in range(10):  # до 10 попыток на случай коллизии
+        for _ in range(10):
             token = _gen_invoice_token()
             exists = await conn.fetchrow("SELECT id FROM invoices WHERE token=$1", token)
             if not exists:
                 break
         await conn.execute(
-            """INSERT INTO invoices (token, user_id, user_tag, amount, status, created_at, created_date)
-               VALUES ($1, $2, $3, $4, 'pending', $5, $6)""",
-            token, user_id, user_tag, amount, now, today,
+            """INSERT INTO invoices (token, user_id, user_tag, amount, status, created_at, created_date, site_id)
+               VALUES ($1, $2, $3, $4, 'pending', $5, $6, $7)""",
+            token, user_id, user_tag, amount, now, today, site_id,
         )
     return token
 
@@ -620,7 +628,9 @@ async def get_user_invoices(user_id: int, limit: int = 10) -> list:
     pool = await get_pool()
     async with pool.acquire() as conn:
         rows = await conn.fetch(
-            "SELECT * FROM invoices WHERE user_id=$1 ORDER BY id DESC LIMIT $2",
+            """SELECT i.*, s.name as site_name FROM invoices i
+               LEFT JOIN sites s ON i.site_id = s.id
+               WHERE i.user_id=$1 ORDER BY i.id DESC LIMIT $2""",
             user_id, limit,
         )
         return [dict(r) for r in rows]
@@ -631,6 +641,59 @@ async def get_all_invoices(limit: int = 50) -> list:
     pool = await get_pool()
     async with pool.acquire() as conn:
         rows = await conn.fetch(
-            "SELECT * FROM invoices ORDER BY id DESC LIMIT $1", limit,
+            """SELECT i.*, s.name as site_name FROM invoices i
+               LEFT JOIN sites s ON i.site_id = s.id
+               ORDER BY i.id DESC LIMIT $1""",
+            limit,
         )
         return [dict(r) for r in rows]
+
+
+# ── Sites ─────────────────────────────────────────────────────────────────────
+
+async def add_site(name: str, domain: str) -> int:
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow(
+            "INSERT INTO sites (name, domain, active) VALUES ($1, $2, TRUE) RETURNING id",
+            name, domain,
+        )
+        return row["id"]
+
+
+async def get_all_sites() -> list:
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        rows = await conn.fetch("SELECT * FROM sites ORDER BY id")
+        return [dict(r) for r in rows]
+
+
+async def get_active_sites() -> list:
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        rows = await conn.fetch("SELECT * FROM sites WHERE active=TRUE ORDER BY id")
+        return [dict(r) for r in rows]
+
+
+async def get_site(site_id: int) -> dict | None:
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow("SELECT * FROM sites WHERE id=$1", site_id)
+        return dict(row) if row else None
+
+
+async def delete_site(site_id: int) -> bool:
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        result = await conn.execute("DELETE FROM sites WHERE id=$1", site_id)
+        return result != "DELETE 0"
+
+
+async def toggle_site(site_id: int) -> dict | None:
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow(
+            "UPDATE sites SET active = NOT active WHERE id=$1 RETURNING *",
+            site_id,
+        )
+        return dict(row) if row else None
