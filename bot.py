@@ -535,6 +535,9 @@ async def _finish_invoice(message: Message, state: FSMContext):
         f"🔗 <b>Ссылка для оплаты:</b>\n<code>{link}</code>\n\n"
         f"⚠️ Сохраните ссылку перед тем как закрыть это сообщение!"
     )
+    qr_kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="📷 Получить QR-код", callback_data=f"qr:{token}")]
+    ])
     from aiogram.types import FSInputFile
     try:
         photo = FSInputFile("paymentcreated.png")
@@ -542,10 +545,10 @@ async def _finish_invoice(message: Message, state: FSMContext):
             photo=photo,
             caption=success_text,
             parse_mode="HTML",
-            reply_markup=main_menu(),
+            reply_markup=qr_kb,
         )
     except Exception:
-        await message.answer(success_text, parse_mode="HTML", reply_markup=main_menu())
+        await message.answer(success_text, parse_mode="HTML", reply_markup=qr_kb)
 
     tag_link = f"@{message.from_user.username}" if message.from_user.username else f"<a href='tg://user?id={message.from_user.id}'>{message.from_user.full_name}</a>"
     notify_text = (
@@ -611,6 +614,79 @@ async def cmd_myinvoices(message: Message):
         site_name = inv.get("site_name", "—")
         lines.append(f"{icon} <b>{inv['amount']:.2f} USD</b> | {site_name} | <code>{inv['token']}</code> | {inv['created_at']}\n")
     await message.answer("\n".join(lines), parse_mode="HTML", disable_web_page_preview=True)
+
+
+# ════════════════════════════════════════════════════════════════════════════
+# QR-КОД
+# ════════════════════════════════════════════════════════════════════════════
+
+@dp.callback_query(F.data.startswith("qr:"))
+async def send_qr_code(call: CallbackQuery):
+    token = call.data.split(":", 1)[1]
+    invoice = await db.get_invoice_by_token(token)
+    if not invoice:
+        await call.answer("Чек не найден.", show_alert=True); return
+
+    site = await db.get_site(invoice["site_id"]) if invoice.get("site_id") else None
+    if not site:
+        await call.answer("Сайт не найден.", show_alert=True); return
+
+    from url_builder import build_invoice_url, TEMPLATE_PRESETS
+    try:
+        link = build_invoice_url(site, token, float(invoice["amount"]), invoice["user_tag"])
+    except Exception:
+        link = f"{site['domain'].rstrip('/')}/?t={token}"
+
+    # Определяем логотип по шаблону сайта
+    url_template = site.get("url_template", "")
+    if "{d}" in url_template:
+        logo_path = "coinbase.png"
+    elif "{s}" in url_template:
+        logo_path = "logo_cryptomus.png"
+    else:
+        logo_path = "heleket.png"
+
+    import qrcode
+    import io
+    import os
+    from PIL import Image
+
+    qr = qrcode.QRCode(
+        version=None,
+        error_correction=qrcode.constants.ERROR_CORRECT_H,
+        box_size=10,
+        border=2,
+    )
+    qr.add_data(link)
+    qr.make(fit=True)
+    qr_img = qr.make_image(fill_color="black", back_color="white").convert("RGBA")
+
+    # Накладываем логотип если файл существует
+    if os.path.exists(logo_path):
+        logo = Image.open(logo_path).convert("RGBA")
+        qr_w, qr_h = qr_img.size
+        logo_size = qr_w // 4  # логотип занимает 1/4 QR
+        logo = logo.resize((logo_size, logo_size), Image.LANCZOS)
+        # Белый фон под логотипом
+        bg_size = logo_size + 20
+        bg = Image.new("RGBA", (bg_size, bg_size), "white")
+        bg_pos = ((qr_w - bg_size) // 2, (qr_h - bg_size) // 2)
+        qr_img.paste(bg, bg_pos)
+        logo_pos = ((qr_w - logo_size) // 2, (qr_h - logo_size) // 2)
+        qr_img.paste(logo, logo_pos, mask=logo)
+
+    buf = io.BytesIO()
+    qr_img.save(buf, format="PNG")
+    buf.seek(0)
+
+    from aiogram.types import BufferedInputFile
+    photo = BufferedInputFile(buf.read(), filename="qr.png")
+    await call.message.answer_photo(
+        photo=photo,
+        caption=f"📷 <b>QR-код для оплаты</b>\n\n💰 Сумма: <b>{float(invoice['amount']):.2f} USD</b>\n🔑 Токен: <code>{token}</code>",
+        parse_mode="HTML",
+    )
+    await call.answer()
 
 
 # ════════════════════════════════════════════════════════════════════════════
