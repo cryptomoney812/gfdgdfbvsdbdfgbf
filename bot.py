@@ -355,11 +355,21 @@ async def invoice_start(message: Message, state: FSMContext):
 
     buttons = [[InlineKeyboardButton(text=s["name"], callback_data=f"site_pick:{s['id']}")] for s in sites]
     buttons.append([InlineKeyboardButton(text="❌ Отмена", callback_data="site_cancel")])
-    await message.answer(
-        "🌐 <b>Выберите сайт для создания чека:</b>",
-        parse_mode="HTML",
-        reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons),
-    )
+    from aiogram.types import FSInputFile
+    try:
+        photo = FSInputFile("choosesite.png")
+        await message.answer_photo(
+            photo=photo,
+            caption="🌐 <b>Выберите сайт для создания чека:</b>",
+            parse_mode="HTML",
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons),
+        )
+    except Exception:
+        await message.answer(
+            "🌐 <b>Выберите сайт для создания чека:</b>",
+            parse_mode="HTML",
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons),
+        )
 
 @dp.callback_query(F.data == "site_cancel")
 async def site_cancel(call: CallbackQuery, state: FSMContext):
@@ -378,11 +388,21 @@ async def site_picked(call: CallbackQuery, state: FSMContext):
         f"💰 <b>Сайт: {site['name']}</b>",
         parse_mode="HTML",
     )
-    await call.message.answer(
-        "<b>Введите сумму в USDT:</b>",
-        parse_mode="HTML",
-        reply_markup=kb_cancel(),
-    )
+    from aiogram.types import FSInputFile
+    try:
+        photo = FSInputFile("crpayment.png")
+        await call.message.answer_photo(
+            photo=photo,
+            caption="<b>Введите сумму в USDT:</b>",
+            parse_mode="HTML",
+            reply_markup=kb_cancel(),
+        )
+    except Exception:
+        await call.message.answer(
+            "<b>Введите сумму в USDT:</b>",
+            parse_mode="HTML",
+            reply_markup=kb_cancel(),
+        )
     await state.set_state(InvoiceFSM.amount)
     await call.answer()
 
@@ -408,11 +428,21 @@ async def invoice_process(message: Message, state: FSMContext):
 
     # Для Coinbase нужны дополнительные данные от пользователя
     if "{d}" in data.get("url_template", ""):
-        await message.answer(
-            "👤 <b>Введите имя отправителя (поле From):</b>",
-            parse_mode="HTML",
-            reply_markup=kb_cancel(),
-        )
+        from aiogram.types import FSInputFile
+        try:
+            photo = FSInputFile("crpayment.png")
+            await message.answer_photo(
+                photo=photo,
+                caption="👤 <b>Введите имя отправителя (поле From):</b>",
+                parse_mode="HTML",
+                reply_markup=kb_cancel(),
+            )
+        except Exception:
+            await message.answer(
+                "👤 <b>Введите имя отправителя (поле From):</b>",
+                parse_mode="HTML",
+                reply_markup=kb_cancel(),
+            )
         await state.set_state(InvoiceFSM.from_name)
         return
 
@@ -427,11 +457,21 @@ async def invoice_from_cancel(message: Message, state: FSMContext):
 @dp.message(InvoiceFSM.from_name)
 async def invoice_from_name(message: Message, state: FSMContext):
     await state.update_data(from_name=message.text.strip())
-    await message.answer(
-        "💳 <b>Введите адрес кошелька получателя (Recipient address):</b>\n<i>Например: TQaHgZ...XVke</i>",
-        parse_mode="HTML",
-        reply_markup=kb_cancel(),
-    )
+    from aiogram.types import FSInputFile
+    try:
+        photo = FSInputFile("crpayment.png")
+        await message.answer_photo(
+            photo=photo,
+            caption="💳 <b>Введите адрес кошелька получателя (Recipient address):</b>\n<i>Например: TQaHgZ...XVke</i>",
+            parse_mode="HTML",
+            reply_markup=kb_cancel(),
+        )
+    except Exception:
+        await message.answer(
+            "💳 <b>Введите адрес кошелька получателя (Recipient address):</b>\n<i>Например: TQaHgZ...XVke</i>",
+            parse_mode="HTML",
+            reply_markup=kb_cancel(),
+        )
     await state.set_state(InvoiceFSM.wallet_address)
 
 @dp.message(InvoiceFSM.wallet_address, F.text == "❌ Отмена")
@@ -480,7 +520,7 @@ async def _finish_invoice(message: Message, state: FSMContext):
     await db.increment_user_invoice_count(message.from_user.id)
     now = datetime.now().strftime("%d.%m.%Y %H:%M")
 
-    await message.answer(
+    success_text = (
         f"✅ <b>Чек успешно создан!</b>\n\n"
         f"━━━━━━━━━━━━━━━━━\n"
         f"🌐 Сайт: <b>{site_name}</b>\n"
@@ -489,10 +529,19 @@ async def _finish_invoice(message: Message, state: FSMContext):
         f"📅 Создан: <b>{now}</b>\n"
         f"━━━━━━━━━━━━━━━━━\n\n"
         f"🔗 <b>Ссылка для оплаты:</b>\n<code>{link}</code>\n\n"
-        f"⚠️ Сохраните ссылку перед тем как закрыть это сообщение!",
-        parse_mode="HTML",
-        reply_markup=main_menu(),
+        f"⚠️ Сохраните ссылку перед тем как закрыть это сообщение!"
     )
+    from aiogram.types import FSInputFile
+    try:
+        photo = FSInputFile("paymentcreated.png")
+        await message.answer_photo(
+            photo=photo,
+            caption=success_text,
+            parse_mode="HTML",
+            reply_markup=main_menu(),
+        )
+    except Exception:
+        await message.answer(success_text, parse_mode="HTML", reply_markup=main_menu())
 
     tag_link = f"@{message.from_user.username}" if message.from_user.username else f"<a href='tg://user?id={message.from_user.id}'>{message.from_user.full_name}</a>"
     notify_text = (
