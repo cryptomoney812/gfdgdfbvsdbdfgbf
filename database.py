@@ -12,7 +12,7 @@ _pool = None
 async def get_pool():
     global _pool
     if _pool is None:
-        _pool = await asyncpg.create_pool(DB_URL, ssl="require")
+        _pool = await asyncpg.create_pool(DB_URL, ssl="require", min_size=5, max_size=20)
     return _pool
 
 
@@ -111,10 +111,12 @@ async def init_db():
             );
 
             CREATE TABLE IF NOT EXISTS sites (
-                id      SERIAL PRIMARY KEY,
-                name    TEXT NOT NULL,
-                domain  TEXT NOT NULL,
-                active  BOOLEAN DEFAULT TRUE
+                id             SERIAL PRIMARY KEY,
+                name           TEXT NOT NULL,
+                domain         TEXT NOT NULL,
+                active         BOOLEAN DEFAULT TRUE,
+                url_template   TEXT NOT NULL DEFAULT '{domain}/?t={token}',
+                wallet_address TEXT DEFAULT NULL
             );
         """)
         await conn.execute("""
@@ -127,6 +129,9 @@ async def init_db():
             "ALTER TABLE users ADD COLUMN IF NOT EXISTS mentor_payouts_left INT DEFAULT 0",
             "ALTER TABLE user_logs ADD COLUMN IF NOT EXISTS created_date DATE DEFAULT CURRENT_DATE",
             "ALTER TABLE invoices ADD COLUMN IF NOT EXISTS site_id INT DEFAULT NULL",
+            "ALTER TABLE sites ADD COLUMN IF NOT EXISTS url_template TEXT NOT NULL DEFAULT '{domain}/?t={token}'",
+            "ALTER TABLE sites ADD COLUMN IF NOT EXISTS wallet_address TEXT DEFAULT NULL",
+            "ALTER TABLE users ADD COLUMN IF NOT EXISTS invoice_count INT DEFAULT 0",
         ]:
             try:
                 await conn.execute(col_sql)
@@ -651,12 +656,12 @@ async def get_all_invoices(limit: int = 50) -> list:
 
 # ── Sites ─────────────────────────────────────────────────────────────────────
 
-async def add_site(name: str, domain: str) -> int:
+async def add_site(name: str, domain: str, url_template: str = "{domain}/?t={token}", wallet_address: str = None) -> int:
     pool = await get_pool()
     async with pool.acquire() as conn:
         row = await conn.fetchrow(
-            "INSERT INTO sites (name, domain, active) VALUES ($1, $2, TRUE) RETURNING id",
-            name, domain,
+            "INSERT INTO sites (name, domain, active, url_template, wallet_address) VALUES ($1, $2, TRUE, $3, $4) RETURNING id",
+            name, domain, url_template, wallet_address,
         )
         return row["id"]
 
@@ -697,3 +702,69 @@ async def toggle_site(site_id: int) -> dict | None:
             site_id,
         )
         return dict(row) if row else None
+
+
+# ── Invoice count ─────────────────────────────────────────────────────────────
+
+async def increment_user_invoice_count(user_id: int):
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        await conn.execute(
+            "UPDATE users SET invoice_count=COALESCE(invoice_count,0)+1 WHERE user_id=$1",
+            user_id,
+        )
+
+
+async def get_user_invoice_count(user_id: int) -> int:
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow("SELECT invoice_count FROM users WHERE user_id=$1", user_id)
+        return row["invoice_count"] if row and row["invoice_count"] else 0
+
+
+# ── Site stats ────────────────────────────────────────────────────────────────
+
+async def get_site_stats_all() -> list:
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        rows = await conn.fetch("""
+            SELECT s.id, s.name,
+                   COUNT(i.id) FILTER (WHERE i.created_date = CURRENT_DATE) as count_today,
+                   COUNT(i.id) as count_total,
+                   COALESCE(SUM(i.amount), 0) as sum_total
+            FROM sites s
+            LEFT JOIN invoices i ON s.id = i.site_id
+            GROUP BY s.id, s.name
+            ORDER BY s.id
+        """)
+        return [dict(r) for r in rows]
+
+
+async def get_site_stats_detail(site_id: int) -> dict | None:
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        site = await conn.fetchrow("SELECT * FROM sites WHERE id=$1", site_id)
+        if not site:
+            return None
+        stats = await conn.fetchrow("""
+            SELECT COUNT(id) as count_total,
+                   COALESCE(SUM(amount), 0) as sum_total,
+                   COUNT(id) FILTER (WHERE status='pending') as pending,
+                   COUNT(id) FILTER (WHERE status='paid') as paid,
+                   COUNT(id) FILTER (WHERE status='expired') as expired
+            FROM invoices WHERE site_id=$1
+        """, site_id)
+        top = await conn.fetch("""
+            SELECT user_tag, COUNT(id) as cnt
+            FROM invoices WHERE site_id=$1
+            GROUP BY user_tag ORDER BY cnt DESC LIMIT 5
+        """, site_id)
+        return {
+            "site": dict(site),
+            "count_total": stats["count_total"] or 0,
+            "sum_total": float(stats["sum_total"] or 0),
+            "pending": stats["pending"] or 0,
+            "paid": stats["paid"] or 0,
+            "expired": stats["expired"] or 0,
+            "top_workers": [dict(r) for r in top],
+        }
