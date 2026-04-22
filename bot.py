@@ -62,6 +62,8 @@ class Leavementor(StatesGroup):
 
 class InvoiceFSM(StatesGroup):
     amount = State()
+    from_name = State()      # для Coinbase: имя отправителя
+    wallet_address = State() # для Coinbase: адрес получателя
 
 class AddSiteFSM(StatesGroup):
     template = State()   # выбор шаблона через inline-кнопки
@@ -371,7 +373,7 @@ async def site_picked(call: CallbackQuery, state: FSMContext):
     site = await db.get_site(site_id)
     if not site or not site["active"]:
         await call.answer("Сайт недоступен.", show_alert=True); return
-    await state.update_data(site_id=site_id, site_name=site["name"], site_domain=site["domain"])
+    await state.update_data(site_id=site_id, site_name=site["name"], site_domain=site["domain"], url_template=site.get("url_template", ""))
     await call.message.edit_text(
         f"💰 <b>Сайт: {site['name']}</b>\n\nВведите сумму в USD:\n<i>Например: 50 или 150.50</i>",
         parse_mode="HTML",
@@ -397,6 +399,51 @@ async def invoice_process(message: Message, state: FSMContext):
         return
 
     data = await state.get_data()
+    await state.update_data(amount=amount)
+
+    # Для Coinbase нужны дополнительные данные от пользователя
+    if "{d}" in data.get("url_template", ""):
+        await message.answer(
+            "👤 Введите имя отправителя (поле <b>From</b>):\n<i>Например: Иван или Ivan</i>",
+            parse_mode="HTML",
+            reply_markup=kb_cancel(),
+        )
+        await state.set_state(InvoiceFSM.from_name)
+        return
+
+    await _finish_invoice(message, state)
+
+
+@dp.message(InvoiceFSM.from_name, F.text == "❌ Отмена")
+async def invoice_from_cancel(message: Message, state: FSMContext):
+    await state.clear()
+    await message.answer("Отменено.", reply_markup=main_menu())
+
+@dp.message(InvoiceFSM.from_name)
+async def invoice_from_name(message: Message, state: FSMContext):
+    await state.update_data(from_name=message.text.strip())
+    await message.answer(
+        "💳 Введите адрес кошелька получателя (<b>Recipient address</b>):\n<i>Например: 0x1234...abcd</i>",
+        parse_mode="HTML",
+    )
+    await state.set_state(InvoiceFSM.wallet_address)
+
+@dp.message(InvoiceFSM.wallet_address, F.text == "❌ Отмена")
+async def invoice_wallet_cancel(message: Message, state: FSMContext):
+    await state.clear()
+    await message.answer("Отменено.", reply_markup=main_menu())
+
+@dp.message(InvoiceFSM.wallet_address)
+async def invoice_wallet_address(message: Message, state: FSMContext):
+    wallet = message.text.strip()
+    if not wallet:
+        await message.answer("❌ Адрес не может быть пустым. Введите адрес:"); return
+    await state.update_data(wallet_address=wallet)
+    await _finish_invoice(message, state)
+
+
+async def _finish_invoice(message: Message, state: FSMContext):
+    data = await state.get_data()
     await state.clear()
 
     user = await db.get_or_create_user(
@@ -407,19 +454,26 @@ async def invoice_process(message: Message, state: FSMContext):
 
     site_id = data["site_id"]
     site_name = data["site_name"]
-    site_domain = data["site_domain"]
+    amount = data["amount"]
+    from_name = data.get("from_name", user["tag"])
+    wallet_address = data.get("wallet_address")
 
     token = await db.create_invoice(message.from_user.id, user["tag"], amount, site_id)
     site_full = await db.get_site(site_id)
+
+    # Если пользователь ввёл wallet_address — подставляем в site для url_builder
+    if wallet_address:
+        site_full = dict(site_full)
+        site_full["wallet_address"] = wallet_address
+
     try:
-        link = build_invoice_url(site_full, token, amount, user["tag"])
+        link = build_invoice_url(site_full, token, amount, from_name)
     except ValueError as e:
         await message.answer(f"❌ Ошибка генерации ссылки: {e}", reply_markup=main_menu())
         return
     await db.increment_user_invoice_count(message.from_user.id)
     now = datetime.now().strftime("%d.%m.%Y %H:%M")
 
-    # Красивое сообщение пользователю
     await message.answer(
         f"✅ <b>Чек успешно создан!</b>\n\n"
         f"━━━━━━━━━━━━━━━━━\n"
@@ -436,7 +490,6 @@ async def invoice_process(message: Message, state: FSMContext):
         ]),
     )
 
-    # Уведомление в чат саппортов
     tag_link = f"@{message.from_user.username}" if message.from_user.username else f"<a href='tg://user?id={message.from_user.id}'>{message.from_user.full_name}</a>"
     notify_text = (
         f"🧾 <b>Новый чек создан</b>\n"
@@ -667,15 +720,8 @@ async def addsite_domain(message: Message, state: FSMContext):
     data = await state.get_data()
     await state.update_data(domain=domain)
 
-    # Для Coinbase нужен wallet_address
-    if data.get("preset_key") == "coinbase":
-        await message.answer(
-            "Шаг 4: Введите адрес кошелька (wallet_address):\n<i>Это адрес куда будут отправляться средства</i>",
-            parse_mode="HTML",
-        )
-        await state.set_state(AddSiteFSM.wallet)
-    else:
-        await _finish_addsite(message, state, wallet_address=None)
+    # Для Coinbase wallet_address вводит пользователь при создании чека — не нужен в настройках сайта
+    await _finish_addsite(message, state, wallet_address=None)
 
 
 @dp.message(AddSiteFSM.wallet, F.text == "❌ Отмена")
