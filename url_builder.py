@@ -62,14 +62,8 @@ def build_invoice_url(
 ) -> str:
     """
     Формирует ссылку на чек по шаблону сайта.
-
-    :param site: запись из таблицы sites (dict с ключами domain, url_template, wallet_address)
-    :param token: токен чека
-    :param amount: сумма чека
-    :param user_tag: тег воркера
-    :returns: готовая ссылка
-    :raises ValueError: если сумма невалидна, wallet_address отсутствует для Coinbase,
-                        или шаблон содержит неизвестные плейсхолдеры
+    Для Coinbase: site["wallet_address"] должен быть задан (передаётся пользователем при создании чека).
+    Raises ValueError если сумма невалидна или шаблон содержит неизвестные плейсхолдеры.
     """
     if amount <= 0 or amount > 1_000_000:
         raise ValueError("Invalid amount")
@@ -80,14 +74,13 @@ def build_invoice_url(
     if unknown:
         raise ValueError(f"Unknown placeholder: {{{unknown[0]}}}")
 
-    # Вычисляем значения для специальных плейсхолдеров
     d_value = ""
     s_value = ""
 
     if "{d}" in url_template:
         wallet_address = site.get("wallet_address") or ""
         if not wallet_address:
-            raise ValueError("wallet_address is required for Coinbase template")
+            raise ValueError("Recipient address is required for this site")
         d_value = _encode_coinbase(wallet_address, amount, user_tag)
 
     if "{s}" in url_template:
