@@ -20,6 +20,7 @@ from typing import Any, Callable, Awaitable
 
 from config import ADMIN_CHAT_ID, ADMIN_IDS, BOT_TOKEN, RESERVE_CHANNEL
 import database as db
+from url_builder import build_invoice_url, TEMPLATE_PRESETS, PRESET_LABELS
 from onboarding import router as onboarding_router, start_onboarding
 
 logging.basicConfig(level=logging.INFO)
@@ -63,8 +64,10 @@ class InvoiceFSM(StatesGroup):
     amount = State()
 
 class AddSiteFSM(StatesGroup):
-    name = State()
-    domain = State()
+    template = State()   # выбор шаблона через inline-кнопки
+    name     = State()   # ввод названия
+    domain   = State()   # ввод домена
+    wallet   = State()   # ввод wallet_address (только для Coinbase)
 
 
 # ─── Helpers ─────────────────────────────────────────────────────────────────
@@ -129,6 +132,7 @@ async def build_profile_text(user: dict) -> str:
         f"👤 <b>Ваш профиль</b>\n\n"
         f"⭐️ Ваш тег: <b>{user['tag']}</b>\n"
         f"🧾 Количество выплат: <b>{user['payout_count']}</b>\n"
+        f"🧾 Чеков создано: <b>{user.get('invoice_count', 0)}</b>\n\n"
         f"💰 Сумма выплат: <b>{user['payout_sum']} USDT</b>\n"
         f"🤝 Наставник: <b>{mentor_str}</b>\n"
         f"📊 Процент выплат: <b>{int(user['payout_pct'])}%</b>\n"
@@ -406,7 +410,13 @@ async def invoice_process(message: Message, state: FSMContext):
     site_domain = data["site_domain"]
 
     token = await db.create_invoice(message.from_user.id, user["tag"], amount, site_id)
-    link = f"{site_domain.rstrip('/')}/?t={token}"
+    site_full = await db.get_site(site_id)
+    try:
+        link = build_invoice_url(site_full, token, amount, user["tag"])
+    except ValueError as e:
+        await message.answer(f"❌ Ошибка генерации ссылки: {e}", reply_markup=main_menu())
+        return
+    await db.increment_user_invoice_count(message.from_user.id)
     now = datetime.now().strftime("%d.%m.%Y %H:%M")
 
     # Красивое сообщение пользователю
@@ -423,7 +433,6 @@ async def invoice_process(message: Message, state: FSMContext):
         parse_mode="HTML",
         reply_markup=InlineKeyboardMarkup(inline_keyboard=[
             [InlineKeyboardButton(text="📤 Поделиться ссылкой", switch_inline_query=link)],
-            [InlineKeyboardButton(text="📋 Мои чеки", callback_data="my_invoices:0")],
         ]),
     )
 
@@ -576,53 +585,135 @@ async def admin_sites(message: Message):
         ); return
     lines = ["🌐 <b>Сайты для чеков:</b>\n"]
     for s in sites:
-        status = "✅ Активен" if s["active"] else "❌ Отключён"
-        lines.append(f"<b>{s['id']}. {s['name']}</b> — {status}\n   🔗 {s['domain']}")
+        status = "✅" if s["active"] else "❌"
+        template_short = s.get("url_template", "—")[:35] + ("…" if len(s.get("url_template","")) > 35 else "")
+        wallet = s.get("wallet_address") or "—"
+        if wallet != "—" and len(wallet) > 12:
+            wallet = wallet[:8] + "…" + wallet[-4:]
+        lines.append(
+            f"{status} <b>{s['id']}. {s['name']}</b>\n"
+            f"   🔗 <code>{s['domain']}</code>\n"
+            f"   📋 {template_short}\n"
+            f"   💳 {wallet}\n"
+        )
     lines.append("\n/addsite — добавить\n/delsite ID — удалить\n/togglesite ID — вкл/выкл")
     await message.answer("\n".join(lines), parse_mode="HTML", disable_web_page_preview=True)
+
 
 @dp.message(Command("addsite"))
 async def admin_addsite_start(message: Message, state: FSMContext):
     if not is_admin(message.from_user.id): return
+    buttons = [
+        [InlineKeyboardButton(text="🔴 Heleket",   callback_data="addsite_tpl:heleket")],
+        [InlineKeyboardButton(text="🔵 Coinbase",  callback_data="addsite_tpl:coinbase")],
+        [InlineKeyboardButton(text="🟣 Cryptomus", callback_data="addsite_tpl:cryptomus")],
+        [InlineKeyboardButton(text="❌ Отмена",    callback_data="addsite_cancel")],
+    ]
     await message.answer(
-        "🌐 <b>Добавление сайта</b>\n\nВведите название сайта:\n<i>Например: Heleket</i>",
-        parse_mode="HTML", reply_markup=kb_cancel()
+        "🌐 <b>Добавление сайта</b>\n\nШаг 1: Выберите шаблон:",
+        parse_mode="HTML",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons),
+    )
+    await state.set_state(AddSiteFSM.template)
+
+
+@dp.callback_query(AddSiteFSM.template, F.data.startswith("addsite_tpl:"))
+async def addsite_template_chosen(call: CallbackQuery, state: FSMContext):
+    preset_key = call.data.split(":")[1]
+    url_template = TEMPLATE_PRESETS[preset_key]
+    label = PRESET_LABELS[preset_key]
+    await state.update_data(url_template=url_template, preset_key=preset_key)
+    await call.message.edit_text(
+        f"✅ Шаблон: <b>{label}</b>\n\nШаг 2: Введите название сайта:\n<i>Это название увидят воркеры при выборе сайта</i>",
+        parse_mode="HTML",
     )
     await state.set_state(AddSiteFSM.name)
+    await call.answer()
+
+
+@dp.callback_query(F.data == "addsite_cancel")
+async def addsite_cancel_cb(call: CallbackQuery, state: FSMContext):
+    await state.clear()
+    await call.message.edit_text("Отменено.")
+    await call.answer()
+
 
 @dp.message(AddSiteFSM.name, F.text == "❌ Отмена")
-async def addsite_cancel(message: Message, state: FSMContext):
+async def addsite_name_cancel(message: Message, state: FSMContext):
     await state.clear(); await message.answer("Отменено.", reply_markup=main_menu())
+
 
 @dp.message(AddSiteFSM.name)
 async def addsite_name(message: Message, state: FSMContext):
     await state.update_data(name=message.text.strip())
     await message.answer(
-        "🔗 Введите домен сайта:\n<i>Например: https://pay.example.com</i>",
-        parse_mode="HTML"
+        "Шаг 3: Введите домен сайта:\n<i>Например: https://pay.example.com</i>",
+        parse_mode="HTML",
+        reply_markup=kb_cancel(),
     )
     await state.set_state(AddSiteFSM.domain)
+
 
 @dp.message(AddSiteFSM.domain, F.text == "❌ Отмена")
 async def addsite_domain_cancel(message: Message, state: FSMContext):
     await state.clear(); await message.answer("Отменено.", reply_markup=main_menu())
 
+
 @dp.message(AddSiteFSM.domain)
 async def addsite_domain(message: Message, state: FSMContext):
     domain = message.text.strip().rstrip("/")
     if not domain.startswith("http"):
-        await message.answer("❌ Домен должен начинаться с http:// или https://"); return
+        await message.answer("❌ Домен должен начинаться с http:// или https://\nПопробуйте снова:"); return
+    data = await state.get_data()
+    await state.update_data(domain=domain)
+
+    # Для Coinbase нужен wallet_address
+    if data.get("preset_key") == "coinbase":
+        await message.answer(
+            "Шаг 4: Введите адрес кошелька (wallet_address):\n<i>Это адрес куда будут отправляться средства</i>",
+            parse_mode="HTML",
+        )
+        await state.set_state(AddSiteFSM.wallet)
+    else:
+        await _finish_addsite(message, state, wallet_address=None)
+
+
+@dp.message(AddSiteFSM.wallet, F.text == "❌ Отмена")
+async def addsite_wallet_cancel(message: Message, state: FSMContext):
+    await state.clear(); await message.answer("Отменено.", reply_markup=main_menu())
+
+
+@dp.message(AddSiteFSM.wallet)
+async def addsite_wallet(message: Message, state: FSMContext):
+    wallet = message.text.strip()
+    if not wallet:
+        await message.answer("❌ Адрес не может быть пустым. Введите адрес кошелька:"); return
+    await _finish_addsite(message, state, wallet_address=wallet)
+
+
+async def _finish_addsite(message: Message, state: FSMContext, wallet_address: str | None):
     data = await state.get_data()
     await state.clear()
-    site_id = await db.add_site(data["name"], domain)
+    site_id = await db.add_site(
+        name=data["name"],
+        domain=data["domain"],
+        url_template=data["url_template"],
+        wallet_address=wallet_address,
+    )
+    label = PRESET_LABELS.get(data.get("preset_key", ""), data["url_template"])
+    wallet_str = wallet_address[:8] + "…" + wallet_address[-4:] if wallet_address and len(wallet_address) > 12 else (wallet_address or "—")
     await message.answer(
         f"✅ <b>Сайт добавлен!</b>\n\n"
         f"🆔 ID: <b>{site_id}</b>\n"
         f"📛 Название: <b>{data['name']}</b>\n"
-        f"🔗 Домен: <code>{domain}</code>\n"
+        f"🔗 Домен: <code>{data['domain']}</code>\n"
+        f"📋 Шаблон: <b>{label}</b>\n"
+        f"💳 Кошелёк: <b>{wallet_str}</b>\n"
         f"✅ Статус: Активен",
-        parse_mode="HTML", reply_markup=main_menu()
+        parse_mode="HTML",
+        reply_markup=main_menu(),
     )
+
 
 @dp.message(Command("delsite"))
 async def admin_delsite(message: Message):
@@ -634,11 +725,33 @@ async def admin_delsite(message: Message):
         site_id = int(args[1])
     except ValueError:
         await message.answer("ID должен быть числом."); return
+    # Проверяем наличие чеков
+    pool = await db.get_pool()
+    async with pool.acquire() as conn:
+        count = await conn.fetchval("SELECT COUNT(*) FROM invoices WHERE site_id=$1", site_id)
+    if count and count > 0:
+        await message.answer(
+            f"⚠️ У сайта #{site_id} есть <b>{count}</b> чеков.\n\n"
+            f"Для подтверждения удаления напишите:\n<code>/delsite_confirm {site_id}</code>",
+            parse_mode="HTML",
+        ); return
     ok = await db.delete_site(site_id)
-    if ok:
-        await message.answer(f"✅ Сайт #{site_id} удалён.")
-    else:
-        await message.answer(f"❌ Сайт #{site_id} не найден.")
+    await message.answer(f"✅ Сайт #{site_id} удалён." if ok else f"❌ Сайт #{site_id} не найден.")
+
+
+@dp.message(Command("delsite_confirm"))
+async def admin_delsite_confirm(message: Message):
+    if not is_admin(message.from_user.id): return
+    args = message.text.split()
+    if len(args) != 2:
+        await message.answer("Использование: /delsite_confirm ID"); return
+    try:
+        site_id = int(args[1])
+    except ValueError:
+        await message.answer("ID должен быть числом."); return
+    ok = await db.delete_site(site_id)
+    await message.answer(f"✅ Сайт #{site_id} удалён." if ok else f"❌ Сайт #{site_id} не найден.")
+
 
 @dp.message(Command("togglesite"))
 async def admin_togglesite(message: Message):
@@ -672,7 +785,9 @@ async def admin_help(message: Message):
         "/sites — список сайтов\n"
         "/addsite — добавить сайт\n"
         "/delsite ID — удалить сайт\n"
-        "/togglesite ID — вкл/выкл сайт\n\n"
+        "/togglesite ID — вкл/выкл сайт\n"
+        "/sitestats — статистика по сайтам\n"
+        "/sitestats ID — детальная статистика\n\n"
         "━━ Чеки ━━\n"
         "/invoices — последние 20 чеков\n\n"
         "━━ Выплаты ━━\n"
@@ -1094,6 +1209,52 @@ async def cmd_mystats(message: Message):
         f"🧾 Кол-во выплат: <b>{user['payout_count']}</b>"
     )
     await message.answer(text, parse_mode="HTML")
+
+
+@dp.message(Command("sitestats"))
+async def admin_sitestats(message: Message):
+    if not is_admin(message.from_user.id): return
+    args = message.text.split()
+
+    if len(args) == 2:
+        # Детальная статистика по конкретному сайту
+        try:
+            site_id = int(args[1])
+        except ValueError:
+            await message.answer("Использование: /sitestats [ID]"); return
+        data = await db.get_site_stats_detail(site_id)
+        if not data:
+            await message.answer(f"❌ Сайт #{site_id} не найден."); return
+        site = data["site"]
+        top_lines = "\n".join(
+            f"   {i+1}. <b>{w['user_tag']}</b> — {w['cnt']} чеков"
+            for i, w in enumerate(data["top_workers"])
+        ) or "   Нет данных"
+        await message.answer(
+            f"📊 <b>Статистика: {site['name']}</b>\n\n"
+            f"🧾 Всего чеков: <b>{data['count_total']}</b>\n"
+            f"💰 Общая сумма: <b>{data['sum_total']:.2f} USD</b>\n\n"
+            f"📋 По статусам:\n"
+            f"   ⏳ Ожидают: <b>{data['pending']}</b>\n"
+            f"   ✅ Оплачены: <b>{data['paid']}</b>\n"
+            f"   ❌ Истекли: <b>{data['expired']}</b>\n\n"
+            f"🏆 Топ-5 воркеров:\n{top_lines}",
+            parse_mode="HTML",
+        )
+        return
+
+    # Общая статистика по всем сайтам
+    stats = await db.get_site_stats_all()
+    if not stats:
+        await message.answer("📊 Нет данных по сайтам."); return
+    lines = ["📊 <b>Статистика по сайтам:</b>\n"]
+    for s in stats:
+        lines.append(
+            f"🌐 <b>{s['name']}</b>\n"
+            f"   Сегодня: <b>{s['count_today']}</b> чеков\n"
+            f"   Всего: <b>{s['count_total']}</b> чеков | <b>{float(s['sum_total']):.2f} USD</b>\n"
+        )
+    await message.answer("\n".join(lines), parse_mode="HTML")
 
 
 # ─── Run ─────────────────────────────────────────────────────────────────────
