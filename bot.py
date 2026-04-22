@@ -379,7 +379,7 @@ async def site_picked(call: CallbackQuery, state: FSMContext):
         parse_mode="HTML",
     )
     await call.message.answer(
-        "Введите сумму в USD:\n<i>Например: 50 или 150.50</i>",
+        "<b>Введите сумму в USDT:</b>",
         parse_mode="HTML",
         reply_markup=kb_cancel(),
     )
@@ -409,7 +409,7 @@ async def invoice_process(message: Message, state: FSMContext):
     # Для Coinbase нужны дополнительные данные от пользователя
     if "{d}" in data.get("url_template", ""):
         await message.answer(
-            "👤 Введите имя отправителя (поле <b>From</b>):\n<i>Например: Иван или Ivan</i>",
+            "👤 <b>Введите имя отправителя (поле From):</b>",
             parse_mode="HTML",
             reply_markup=kb_cancel(),
         )
@@ -428,7 +428,7 @@ async def invoice_from_cancel(message: Message, state: FSMContext):
 async def invoice_from_name(message: Message, state: FSMContext):
     await state.update_data(from_name=message.text.strip())
     await message.answer(
-        "💳 Введите адрес кошелька получателя (<b>Recipient address</b>):\n<i>Например: 0x1234...abcd</i>",
+        "💳 <b>Введите адрес кошелька получателя (Recipient address):</b>\n<i>Например: TQaHgZ...XVke</i>",
         parse_mode="HTML",
         reply_markup=kb_cancel(),
     )
