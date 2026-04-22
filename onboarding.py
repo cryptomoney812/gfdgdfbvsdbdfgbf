@@ -1,5 +1,3 @@
-import asyncio
-import logging
 import time
 from aiogram import F, Router
 from aiogram.fsm.context import FSMContext
@@ -10,33 +8,21 @@ import database as db
 
 router = Router()
 
-COOLDOWN = 15  # секунд
+COOLDOWN = 10  # секунд между шагами
+
+TOTAL_STEPS = 6
+TOTAL_QUIZ = 2
+
 
 class Onboarding(StatesGroup):
     viewing = State()
 
 
-def progress_bar(step: int, total: int = 10) -> str:
+def progress_bar(step: int, total: int = TOTAL_STEPS + TOTAL_QUIZ) -> str:
     filled = int((step / total) * 10)
     bar = "█" * filled + "░" * (10 - filled)
     pct = int((step / total) * 100)
     return f"[{bar}] {pct}%"
-
-
-def _build_hierarchy(creator, sup_tags, mentors_raw, moderator, developer) -> str:
-    lines = [f"📖 Шаг 2/10 {progress_bar(2)}\n\n👥 <b>Вертикаль обращений — к кому писать</b>\n\nВажно понимать иерархию, чтобы не тратить время зря:\n\n"]
-    if creator and creator != "@id":
-        lines.append(f"• 👑 Создатель: {creator}\n  └ только критические вопросы\n")
-    if sup_tags and sup_tags != "—":
-        lines.append(f"• 💎 Саппорты: {sup_tags}\n  └ вопросы по логам\n")
-    if mentors_raw and mentors_raw != "@id":
-        lines.append(f"• 🎓 Наставники: {mentors_raw}\n  └ обучение, помощь в варке\n")
-    if moderator and moderator != "@id":
-        lines.append(f"• 🛡 Модератор: {moderator}\n  └ вопросы по чату, небольшие нюансы\n")
-    if developer and developer != "@id":
-        lines.append(f"• ⚙️ Разработчик/парсер: {developer}\n  └ только сложные кейсы\n")
-    lines.append("\n⚡️ <b>Золотое правило:</b> Пиши по делу и строго по своей теме!")
-    return "".join(lines)
 
 
 async def get_step_text(step: int) -> str:
@@ -52,97 +38,84 @@ async def get_step_text(step: int) -> str:
 
     creator     = await db.get_setting("role_creator") or "@id"
     moderator   = await db.get_setting("role_moderator") or "@id"
-    developer   = await db.get_setting("role_developer") or "@id"
     mentors_raw = await db.get_setting("role_mentors") or "@id"
 
     steps = {
         1: (
-            f"📖 Шаг 1/10 {progress_bar(1)}\n\n"
-            "👋 Добро пожаловать в команду!\n\n"
-            "Я проведу тебя через короткий, но <b>очень важный</b> инструктаж.\n"
-            "Это займёт всего 5-7 минут, но сэкономит часы твоего времени в будущем.\n\n"
+            f"📖 Шаг 1/{TOTAL_STEPS} {progress_bar(1)}\n\n"
+            "👋 <b>Добро пожаловать в команду!</b>\n\n"
+            "Я проведу тебя через короткий инструктаж — это займёт всего несколько минут.\n\n"
             "<b>Что тебя ждёт:</b>\n"
-            "• 🎯 7 коротких обучающих шагов\n"
-            "• 📝 3 проверочных вопроса (квиз)\n\n"
-            "⚠️ <b>Важно:</b> Будь внимателен и не пропускай информацию!\n\n"
-            "Готов начать? Жми «Следующий шаг» ⬇️"
+            f"• 📚 {TOTAL_STEPS} обучающих шагов\n"
+            f"• 📝 {TOTAL_QUIZ} проверочных вопроса\n\n"
+            "⚠️ <b>Читай внимательно — от этого зависит твой результат!</b>\n\n"
+            "Готов? Жми «Следующий шаг» ⬇️"
         ),
-        2: _build_hierarchy(creator, sup_tags, mentors_raw, moderator, developer),
+        2: (
+            f"📖 Шаг 2/{TOTAL_STEPS} {progress_bar(2)}\n\n"
+            "👥 <b>Иерархия команды</b>\n\n"
+            "Важно знать к кому и по каким вопросам обращаться:\n\n"
+            + (f"• 👑 Создатель: {creator}\n  └ только критические вопросы\n" if creator != "@id" else "")
+            + (f"• 💎 Саппорты: {sup_tags}\n  └ вопросы по чекам и работе\n" if sup_tags != "—" else "")
+            + (f"• 🎓 Наставники: {mentors_raw}\n  └ обучение и помощь\n" if mentors_raw != "@id" else "")
+            + (f"• 🛡 Модератор: {moderator}\n  └ вопросы по чату\n" if moderator != "@id" else "")
+            + "\n⚡️ <b>Золотое правило:</b> пиши по делу и строго по своей теме!"
+        ),
         3: (
-            f"📖 Шаг 3/10 {progress_bar(3)}\n\n"
-            "⏰ <b>Рабочее время и режим приёма логов</b>\n\n"
+            f"📖 Шаг 3/{TOTAL_STEPS} {progress_bar(3)}\n\n"
+            "⏰ <b>Режим работы</b>\n\n"
             "📅 Наши смены:\n"
             "• ☀️ Дневной ворк: 10:00 – 20:00\n"
             "• 🌙 Ночной ворк: 20:00 – 00:00 и 07:00 – 10:00\n\n"
-            "🚦 Режимы бота:\n"
-            "• ☀️ «Дневной ворк» — дневная смена активна\n"
-            "• 🌙 «Ночной ворк» — ночная смена активна\n"
-            "• 🛑 «Стоп» — приём логов приостановлен\n\n"
-            "⚠️ <b>Важно:</b>\n"
-            "• Логи принимаются ТОЛЬКО во время активной смены\n"
-            "• В режиме «Стоп» не передавай логи в бота\n"
-            "• Если срочный лог — пиши напрямую саппортам\n\n"
-            "💡 Качество варки = 50% успеха!"
+            "🚦 Статусы бота:\n"
+            "• ☀️ <b>Дневной ворк</b> — смена активна\n"
+            "• 🌙 <b>Ночной ворк</b> — смена активна\n"
+            "• 🔴 <b>Стоп</b> — работа приостановлена\n\n"
+            "⚠️ Создавай чеки только во время активной смены.\n"
+            "Если срочный вопрос — пиши саппортам напрямую."
         ),
         4: (
-            f"📖 Шаг 4/10 {progress_bar(4)}\n\n"
-            "🎛 <b>Главное меню бота — твой командный центр</b>\n\n"
-            "• 📤 «Передать кошелёк»\n"
-            "  └ пошаговая передача логов\n"
-            "• 📄 «Мои логи»\n"
-            "  └ история переданных логов и их статусы\n"
-            "• ✏️ «Изменить тег»\n"
-            "  └ настройка твоего уникального ника\n"
-            "• 💡 «Полезная информация»\n"
-            "  └ доступ к каналам команды\n"
-            "• ⭐️ «Оставить отзыв»\n"
-            "  └ доступно после 1 засчитанного лога"
+            f"📖 Шаг 4/{TOTAL_STEPS} {progress_bar(4)}\n\n"
+            "🧾 <b>Как работают чеки</b>\n\n"
+            "Создать чек можно на любую сумму.\n\n"
+            "⚠️ <b>Важно знать перед отправкой клиенту:</b>\n\n"
+            "• Чеки работают только с <b>USDT TRC-20</b>\n\n"
+            "• Убедись, что у клиента <b>WEB3-кошелёк</b> (Trust Wallet, MetaMask и т.д.)\n\n"
+            "• Если у клиента <b>биржа</b> — он не сможет подключить кошелёк.\n"
+            "  └ Попроси перенести кошелёк по сид-фразе в <b>Trust Wallet</b>\n"
+            "  └ После этого он сможет подключиться к системе\n\n"
+            "• Если клиент не хочет переносить — попроси <b>другой кошелёк</b>.\n"
+            "  └ Скажи, что у тебя выдаёт ошибку при переводе на его адрес\n\n"
+            "💡 <b>Правило:</b> клиент должен иметь WEB3-кошелёк — это обязательное условие."
         ),
         5: (
-            f"📖 Шаг 5/10 {progress_bar(5)}\n\n"
-            "💰 <b>Условия выплат за логи</b>\n\n"
-            "💵 Базовая ставка: 5 $ за хороший лог\n\n"
-            "✅ <b>Требования к логу:</b>\n"
-            "• Сумма от 2000 $\n"
-            "• Кошелёк не бит\n"
-            "• Только TRC-20 сеть\n"
-            "• Не рекламный лог\n"
-            "• Менее 100 страниц операций\n"
-            "• Не обменник\n"
-            "• Не в запретной сфере\n"
-            "• Сумма сделки ≤ 50% баланса\n\n"
-            "📊 <b>Процент от профита:</b>\n"
-            f"• Базовый: <b>{int(base_pct)}%</b>\n"
-            f"• С наставником: <b>{int(mentor_pct)}%</b> (−10 п.п.)\n\n"
-            "💡 Наставник увеличивает количество и качество выплат!"
+            f"📖 Шаг 5/{TOTAL_STEPS} {progress_bar(5)}\n\n"
+            "💰 <b>Система выплат</b>\n\n"
+            f"📊 Твой процент от профита: <b>{int(base_pct)}%</b>\n"
+            + (f"📊 С наставником: <b>{int(mentor_pct)}%</b> (−10 п.п.)\n\n" if mentor_pct != base_pct else "\n")
+            + "💸 Выплаты производятся администратором вручную.\n\n"
+            "🤝 <b>Наставник</b> — опытный участник команды, который поможет тебе:\n"
+            "• Быстрее освоиться\n"
+            "• Увеличить количество успешных сделок\n"
+            "• Разобраться в сложных ситуациях\n\n"
+            "Наставник работает с тобой на протяжении <b>5 выплат</b>.\n"
+            "Выбрать наставника можно в разделе «🎓 Наставники»."
         ),
         6: (
-            f"📖 Шаг 6/10 {progress_bar(6)}\n\n"
-            "📚 <b>Информационные каналы</b>\n\n"
-            "• 📖 Мануалы — обучающие материалы\n"
-            "• 💸 Выплаты — прозрачность выплат\n"
-            "• 📁 Документы — шаблоны, скрипты\n"
-            "• 💡 Полезная информация — лайфхаки, новости\n\n"
-            "🔗 Все ссылки доступны в боте через «💡 Полезная информация»\n\n"
-            "⚡️ Подпишись на все каналы — это займёт пару минут!"
-        ),
-        7: (
-            f"📖 Шаг 7/10 {progress_bar(7)}\n\n"
-            "🛡 <b>Безопасность и инструменты</b>\n\n"
+            f"📖 Шаг 6/{TOTAL_STEPS} {progress_bar(6)}\n\n"
+            "🛡 <b>Безопасность</b>\n\n"
             "🔐 <b>VPN — обязателен!</b>\n"
             "• Используй @spaacevpn_bot\n"
             "• Скрывает твой реальный IP\n\n"
-            "📱 <b>Номера для работы</b>\n"
+            "📱 <b>Номера для работы:</b>\n"
             "• WhatsApp/Telegram: @qrx_shop_bot\n"
-            "• НЕ связывай с личными данными\n\n"
-            "⚠️ <b>Правила безопасности:</b>\n"
-            "• ❌ Не светить личные данные\n"
-            "• ❌ Не переходить по ссылкам от клиентов\n"
-            "• ❌ Не использовать личные номера\n"
-            "• ✅ Всегда через VPN\n"
-            "• ✅ Отдельные аккаунты для работы\n"
-            "• ✅ Прокси (@Betternever_findbot) для мультиаккаунтов\n\n"
-            "🛡️ Безопасность — залог долгой работы!"
+            "• Не используй личные номера\n\n"
+            "⚠️ <b>Правила:</b>\n"
+            "• ❌ Не раскрывай личные данные\n"
+            "• ❌ Не переходи по ссылкам от клиентов\n"
+            "• ✅ Работай только через VPN\n"
+            "• ✅ Используй отдельные аккаунты для работы\n\n"
+            "🛡 Безопасность — залог долгой и стабильной работы!"
         ),
     }
     return steps.get(step, "")
@@ -150,59 +123,41 @@ async def get_step_text(step: int) -> str:
 
 QUIZ = [
     {
-        "step": 8,
+        "step": TOTAL_STEPS + 1,
         "question": (
-            f"📖 Шаг 8/10 {progress_bar(8)}\n\n"
-            "📝 <b>Проверка знаний #1</b>\n\n"
-            "<b>Вопрос 1 из 3:</b>\n"
-            "В какое время работает дневная смена?\n\n"
-            "А) 09:00 – 22:00\n"
-            "В) 10:00 – 20:00\n"
-            "С) 07:00 – 11:00"
+            f"📝 Вопрос 1/2 {progress_bar(TOTAL_STEPS + 1)}\n\n"
+            "<b>Что нужно клиенту для работы с чеком?</b>\n\n"
+            "А) Аккаунт на бирже\n"
+            "В) WEB3-кошелёк (например Trust Wallet)\n"
+            "С) Банковская карта"
         ),
         "correct": "B",
-        "correct_text": "В) 10:00 – 20:00",
+        "correct_text": "В) WEB3-кошелёк (например Trust Wallet)",
     },
     {
-        "step": 9,
+        "step": TOTAL_STEPS + 2,
         "question": (
-            f"📖 Шаг 9/10 {progress_bar(9)}\n\n"
-            "📝 <b>Проверка знаний #2</b>\n\n"
-            "<b>Вопрос 2 из 3:</b>\n"
-            "Какая минимальная сумма для передачи лога?\n\n"
-            "А) 500 $\n"
-            "В) 1000 $\n"
-            "С) 2000 $"
-        ),
-        "correct": "C",
-        "correct_text": "С) 2000 $",
-    },
-    {
-        "step": 10,
-        "question": (
-            f"📖 Шаг 10/10 {progress_bar(10)}\n\n"
-            "📝 <b>Проверка знаний #3</b>\n\n"
-            "<b>Вопрос 3 из 3:</b>\n"
-            "Какую сеть кошелька принимает бот?\n\n"
+            f"📝 Вопрос 2/2 {progress_bar(TOTAL_STEPS + 2)}\n\n"
+            "<b>С какой сетью работают чеки?</b>\n\n"
             "А) ERC-20\n"
             "В) BEP-20\n"
-            "С) TRC-20"
+            "С) TRC-20 (USDT)"
         ),
         "correct": "C",
-        "correct_text": "С) TRC-20",
+        "correct_text": "С) TRC-20 (USDT)",
     },
 ]
 
 FINISH_TEXT = (
-    "🎉 <b>Поздравляем! Ты успешно прошёл инструктаж!</b>\n\n"
+    "🎉 <b>Инструктаж пройден!</b>\n\n"
     "✅ Все вопросы отвечены верно.\n\n"
-    "Теперь ты знаешь:\n"
-    "• Как и к кому обращаться\n"
-    "• Когда принимаются логи\n"
+    "<b>Ты знаешь:</b>\n"
+    "• Как устроена команда и к кому обращаться\n"
+    "• Как работают чеки и что нужно клиенту\n"
     "• Как работает система выплат\n"
     "• Как оставаться в безопасности\n\n"
     "🚀 <b>Удачи в работе! Команда верит в тебя.</b>\n\n"
-    "Возвращайся в главное меню и начинай работать 💪"
+    "Возвращайся в главное меню и начинай 💪"
 )
 
 
@@ -210,6 +165,7 @@ def kb_next(step: int):
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="➡️ Следующий шаг", callback_data=f"ob_next:{step}")]
     ])
+
 
 def kb_quiz(step: int):
     return InlineKeyboardMarkup(inline_keyboard=[
@@ -232,8 +188,7 @@ async def start_onboarding(message: Message, state: FSMContext):
 async def ob_next(call: CallbackQuery, state: FSMContext):
     current_step = int(call.data.split(":")[1])
     data = await state.get_data()
-    started_at = data.get("started_at", 0)
-    elapsed = time.time() - started_at
+    elapsed = time.time() - data.get("started_at", 0)
 
     if elapsed < COOLDOWN:
         remaining = int(COOLDOWN - elapsed)
@@ -241,8 +196,6 @@ async def ob_next(call: CallbackQuery, state: FSMContext):
         return
 
     await call.answer()
-
-    # Удаляем текущее сообщение
     try:
         await call.message.delete()
     except Exception:
@@ -250,14 +203,18 @@ async def ob_next(call: CallbackQuery, state: FSMContext):
 
     next_step = current_step + 1
 
-    if next_step <= 7:
+    if next_step <= TOTAL_STEPS:
         text = await get_step_text(next_step)
         await call.message.answer(text, parse_mode="HTML", reply_markup=kb_next(next_step))
         await state.update_data(step=next_step, started_at=time.time())
     else:
         quiz = QUIZ[0]
-        await state.update_data(step=8, quiz_idx=0, started_at=time.time())
-        await call.message.answer(quiz["question"] + "\n\nВыбери правильный вариант ⬇️", parse_mode="HTML", reply_markup=kb_quiz(8))
+        await state.update_data(step=TOTAL_STEPS + 1, quiz_idx=0, started_at=time.time())
+        await call.message.answer(
+            quiz["question"] + "\n\nВыбери правильный вариант ⬇️",
+            parse_mode="HTML",
+            reply_markup=kb_quiz(TOTAL_STEPS + 1),
+        )
 
 
 @router.callback_query(Onboarding.viewing, F.data.startswith("ob_quiz:"))
@@ -273,13 +230,12 @@ async def ob_quiz(call: CallbackQuery, state: FSMContext):
     await call.answer()
 
     if answer == quiz["correct"]:
-        # Удаляем текущее сообщение
         try:
             await call.message.delete()
         except Exception:
             pass
 
-        if quiz_idx < 2:
+        if quiz_idx < len(QUIZ) - 1:
             next_quiz = QUIZ[quiz_idx + 1]
             await state.update_data(quiz_idx=quiz_idx + 1)
             await call.message.answer(
@@ -295,7 +251,6 @@ async def ob_quiz(call: CallbackQuery, state: FSMContext):
                 parse_mode="HTML",
             )
     else:
-        # При неверном ответе не удаляем, просто показываем правильный
         await call.message.answer(
             f"❌ <b>Неверно.</b>\n\nПравильный ответ: <b>{quiz['correct_text']}</b>\n\nПопробуй ещё раз:",
             parse_mode="HTML",
