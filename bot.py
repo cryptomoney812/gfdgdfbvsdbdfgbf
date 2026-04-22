@@ -374,7 +374,11 @@ async def invoice_start(message: Message, state: FSMContext):
 @dp.callback_query(F.data == "site_cancel")
 async def site_cancel(call: CallbackQuery, state: FSMContext):
     await state.clear()
-    await call.message.edit_text("Отменено.")
+    try:
+        await call.message.delete()
+    except Exception:
+        pass
+    await call.message.answer("Отменено.", reply_markup=main_menu())
     await call.answer()
 
 @dp.callback_query(F.data.startswith("site_pick:"))
@@ -384,10 +388,10 @@ async def site_picked(call: CallbackQuery, state: FSMContext):
     if not site or not site["active"]:
         await call.answer("Сайт недоступен.", show_alert=True); return
     await state.update_data(site_id=site_id, site_name=site["name"], site_domain=site["domain"], url_template=site.get("url_template", ""))
-    await call.message.edit_text(
-        f"💰 <b>Сайт: {site['name']}</b>",
-        parse_mode="HTML",
-    )
+    try:
+        await call.message.delete()
+    except Exception:
+        pass
     from aiogram.types import FSInputFile
     try:
         photo = FSInputFile("crpayment.png")
